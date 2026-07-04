@@ -50,7 +50,10 @@ PROJECT_DIR = SCRIPT_DIR.parent                 # .../blood_mil_project
 HOME_DIR    = PROJECT_DIR.parent                # /home/sp00001
 
 sys.path.insert(0, str(HOME_DIR))
-from shared_functions_V1 import predict_labels_and_report_performance
+from shared_functions_V2 import (
+    predict_labels_and_report_performance,
+    SVMMILWrapper as SVMMILWrapper5Class,  # V2의 SVMMILWrapper 가 이미 5-class 대응
+)
 
 # ── 레이블 정의 ───────────────────────────────────────────────
 SUBTYPE_TO_LABEL = {
@@ -75,35 +78,6 @@ class BagObject:
     patient_id: str
     instances: np.ndarray   # shape (60,) — 이미 mean-pooled bag feature
     true_label: int
-
-
-# ── 5-class 용 SVMMILWrapper ──────────────────────────────────
-class SVMMILWrapper5Class:
-    """
-    shared_functions_V1 의 SVMMILWrapper 를 5-class 에 맞게 재정의.
-
-    원본 SVMMILWrapper 는 binary (labels=[0,1]) 를 가정하므로
-    5-class 에서는 decision_function 결과 해석이 달라집니다.
-
-    predict_bag(bag_instances):
-      - bag_instances : np.ndarray shape (60,) — mean-pooled bag feature
-      - returns {"pred_score": float, "pred_label": int}
-        pred_score : 예측 클래스의 decision score (max over classes)
-        pred_label : argmax class (0~4)
-    """
-    def __init__(self, fitted_pipeline):
-        self.model = fitted_pipeline   # StandardScaler + SVC 파이프라인
-
-    def predict_bag(self, bag_instances: np.ndarray) -> dict:
-        # bag_instances: (60,) → reshape to (1, 60) for sklearn
-        x = bag_instances.reshape(1, -1)
-        scores = self.model.decision_function(x)   # shape (1, n_classes) for OvR
-        pred_label = int(np.argmax(scores))
-        pred_score = float(np.max(scores))
-        return {
-            "pred_score": pred_score,
-            "pred_label": pred_label,
-        }
 
 
 # ──────────────────────────────────────────────────────────────
@@ -272,6 +246,13 @@ def print_distribution(label: str, y: np.ndarray):
 # 7. Main
 # ──────────────────────────────────────────────────────────────
 
+def log(msg):
+    """SLURM 로그에 즉시 출력되도록 flush 포함."""
+    import datetime
+    ts = datetime.datetime.now().strftime("%H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="SVM-MIL 5-class — holdout 기반 train/test 분할"
@@ -281,11 +262,11 @@ def main():
     parser.add_argument("--seed", type=int, default=42)
     args = parser.parse_args()
 
-    # 경로: 스크립트 위치(models/gen1_svm)에서 자동 계산
-    project_dir   = PROJECT_DIR                              # blood_mil_project/
+    # 경로: 스크립트 위치(soeun_scripts/)에서 자동 계산
+    project_dir   = PROJECT_DIR
     organized_dir = project_dir / "organized_data"
     holdout_dir   = project_dir / "holdout_data"
-    output_dir    = project_dir                              # predictions/, performance/ 위치
+    output_dir    = project_dir
     cache_path    = project_dir / "cache" / "bag_features_5class.npz"
 
     for p, name in [(organized_dir, "organized_data"),
@@ -293,22 +274,22 @@ def main():
         if not p.exists():
             raise FileNotFoundError(f"{name} not found: {p}")
 
-    print("=" * 60)
-    print("SVM-MIL: AML Subtype Classification (5-class)")
-    print(f"  Gen      : gen1_svm")
-    print(f"  Model    : svm_mil_v1")
-    print(f"  Classes  : {CLASS_NAMES}")
-    print(f"  Project  : {project_dir}")
-    print(f"  Script   : {SCRIPT_DIR}")
-    print(f"  Cache    : {cache_path}")
-    print("=" * 60)
+    log("=" * 55)
+    log("START: SVM-MIL Subtype Classification (5-class)")
+    log(f"  Project  : {project_dir}")
+    log(f"  Script   : {SCRIPT_DIR}")
+    log(f"  Cache    : {cache_path}")
+    log(f"  Classes  : {CLASS_NAMES}")
+    log("=" * 55)
 
-    # ── Step 1: 피처 추출 (189명 전체, 캐시 공유) ──────────────
+    # ── Step 1: 피처 추출 ──────────────────────────────────────
+    log("[Step 1/7] 피처 추출 시작 (캐시 있으면 즉시 로드)")
     df = extract_all_bag_features(organized_dir, cache_path, args.max_cells_per_patient)
     feat_cols = [c for c in df.columns if c.startswith("f") and c[1:].isdigit()]
-    print(f"\n전체 환자: {len(df)}명  |  피처 차원: {len(feat_cols)}")
+    log(f"[Step 1/7] 완료 — 전체 환자: {len(df)}명, 피처 차원: {len(feat_cols)}")
 
     # ── Step 2: holdout 분리 ───────────────────────────────────
+    log("[Step 2/7] holdout 분리 중...")
     holdout_folders = load_holdout_folders(holdout_dir)
 
     train_df   = df[~df["folder"].isin(holdout_folders)].reset_index(drop=True)
@@ -316,16 +297,17 @@ def main():
 
     missing = holdout_folders - set(holdout_df["folder"])
     if missing:
-        print(f"  [WARN] holdout_patients.txt 에 있지만 organized_data에 없는 폴더: {missing}")
+        log(f"  [WARN] holdout_patients.txt에 있지만 organized_data에 없는 폴더: {missing}")
 
+    log(f"[Step 2/7] 완료 — Train: {len(train_df)}명 / Holdout(test): {len(holdout_df)}명")
     print_distribution("Train (학습)", train_df["label"].values)
     print_distribution("Test  (holdout)", holdout_df["label"].values)
 
     # ── Step 3: SVM 학습 ───────────────────────────────────────
+    log("[Step 3/7] SVM 학습 시작...")
     X_train = train_df[feat_cols].values
     y_train = train_df["label"].values
 
-    print("\n  SVM 학습 중...")
     pipeline = Pipeline([
         ("scaler", StandardScaler()),
         ("svm", SVC(
@@ -338,69 +320,68 @@ def main():
         )),
     ])
     pipeline.fit(X_train, y_train)
-    print("  완료.")
+    log("[Step 3/7] SVM 학습 완료")
 
-    # ── Step 4: 모델 저장 (.joblib, 가이드라인 §1) ─────────────
-    # blood_mil_project/models/gen1_svm/ 에 저장
+    # ── Step 4: 모델 저장 ──────────────────────────────────────
+    log("[Step 4/7] 모델 저장 중...")
     model_dir  = project_dir / "models" / "gen1_svm"
     model_dir.mkdir(parents=True, exist_ok=True)
     model_path = model_dir / "svm_mil_v1.joblib"
     joblib.dump(pipeline, model_path)
-    print(f"  모델 저장: {model_path}")
+    log(f"[Step 4/7] 모델 저장 완료 → {model_path}")
 
     # ── Step 5: holdout BagObject 목록 구성 ────────────────────
+    log("[Step 5/7] holdout BagObject 구성 중...")
     holdout_bags = []
     for _, row in holdout_df.iterrows():
         holdout_bags.append(BagObject(
             patient_id = row["folder"],
-            instances  = row[feat_cols].values.astype(float),  # (60,)
+            instances  = row[feat_cols].values.astype(float),
             true_label = int(row["label"]),
         ))
+    log(f"[Step 5/7] 완료 — holdout bag {len(holdout_bags)}개 구성")
 
-    # ── Step 6: shared_functions 평가 ─────────────────────────
-    # predict_labels_and_report_performance 는 binary confusion matrix 를
-    # 가정하므로, 5-class 에서는 별도 상세 평가를 추가로 출력합니다.
+    # ── Step 6: shared_functions_V2 평가 ─────────────────────
+    log("[Step 6/7] holdout 평가 중 (shared_functions_V2)...")
     svm_wrapper = SVMMILWrapper5Class(pipeline)
-
-    print("\n  holdout 평가 중 (shared_functions)...")
     bag_df, metrics_df = predict_labels_and_report_performance(
-        model      = svm_wrapper,
+        model        = svm_wrapper,
         holdout_bags = holdout_bags,
-        model_gen  = "gen1_svm",
-        model_name = "svm_mil_v1",
-        output_dir = str(output_dir),
+        model_gen    = "gen1_svm",
+        model_name   = "svm_mil_v1",
+        output_dir   = str(output_dir),
     )
+    log("[Step 6/7] 평가 완료")
 
     # ── Step 7: 5-class 상세 결과 출력 및 저장 ────────────────
-    y_true = holdout_df["label"].values
-    y_pred = np.array([bag_df.loc[bag_df["patient_id"] == row["folder"], "pred_label"].values[0]
-                       for _, row in holdout_df.iterrows()])
+    log("[Step 7/7] 5-class 상세 결과 계산 중...")
+    # bag_df 는 이미 holdout 순서대로 정렬되어 있으므로 직접 사용
+    y_true = bag_df["true_label"].values
+    y_pred = bag_df["pred_label"].values
 
-    f1_per_cls = f1_score(
-        y_true, y_pred,
-        labels=list(range(len(CLASS_NAMES))),
-        average=None, zero_division=0,
-    )
+    f1_per_cls  = f1_score(y_true, y_pred, labels=list(range(len(CLASS_NAMES))),
+                           average=None, zero_division=0)
     f1_macro    = f1_score(y_true, y_pred, average="macro",    zero_division=0)
     f1_weighted = f1_score(y_true, y_pred, average="weighted", zero_division=0)
     acc         = accuracy_score(y_true, y_pred)
     cm          = confusion_matrix(y_true, y_pred, labels=list(range(len(CLASS_NAMES))))
 
-    print(f"\n{'='*60}")
-    print("Holdout 평가 결과 (5-class)")
-    print(f"{'='*60}")
-    print(f"  Accuracy     : {acc:.3f}")
-    print(f"  F1 (macro)   : {f1_macro:.3f}")
-    print(f"  F1 (weighted): {f1_weighted:.3f}")
-    print(f"\n  클래스별 F1:")
+    print("", flush=True)
+    print("=" * 60, flush=True)
+    print("Holdout 평가 결과 (5-class)", flush=True)
+    print("=" * 60, flush=True)
+    print(f"  Accuracy     : {acc:.3f}", flush=True)
+    print(f"  F1 (macro)   : {f1_macro:.3f}", flush=True)
+    print(f"  F1 (weighted): {f1_weighted:.3f}", flush=True)
+    print(f"\n  클래스별 F1:", flush=True)
     for cls, f1 in zip(CLASS_NAMES, f1_per_cls):
-        print(f"    {cls:<20}: {f1:.3f}")
+        print(f"    {cls:<20}: {f1:.3f}", flush=True)
 
-    print(f"\n  Confusion matrix (행=정답, 열=예측):")
+    print(f"\n  Confusion matrix (행=정답, 열=예측):", flush=True)
     header = "            " + "  ".join(f"{n[:6]:>6}" for n in CLASS_NAMES)
-    print(header)
+    print(header, flush=True)
     for i, row in enumerate(cm):
-        print(f"  {CLASS_NAMES[i][:10]:<12}" + "  ".join(f"{v:>6}" for v in row))
+        print(f"  {CLASS_NAMES[i][:10]:<12}" + "  ".join(f"{v:>6}" for v in row), flush=True)
 
     report = classification_report(
         y_true, y_pred,
@@ -408,34 +389,32 @@ def main():
         target_names=CLASS_NAMES,
         zero_division=0,
     )
-    print(f"\n  Classification report:\n{report}")
+    print(f"\n  Classification report:\n{report}", flush=True)
 
-    # 5-class 상세 지표를 performance 폴더에 추가 저장
-    perf_dir = output_dir / "performance"
-    perf_dir.mkdir(parents=True, exist_ok=True)
-
+    # 5-class 상세 지표 JSON 추가 저장
     detail = {
-        "model_gen":   "gen1_svm",
-        "model_name":  "svm_mil_v1",
-        "n_train":     int(len(train_df)),
-        "n_test":      int(len(holdout_df)),
-        "accuracy":    float(acc),
-        "f1_macro":    float(f1_macro),
-        "f1_weighted": float(f1_weighted),
+        "model_gen":    "gen1_svm",
+        "model_name":   "svm_mil_v1",
+        "n_train":      int(len(train_df)),
+        "n_test":       int(len(holdout_df)),
+        "accuracy":     float(acc),
+        "f1_macro":     float(f1_macro),
+        "f1_weighted":  float(f1_weighted),
         "per_class_f1": {cls: float(f1_per_cls[SUBTYPE_TO_LABEL[cls]]) for cls in CLASS_NAMES},
     }
     detail_path = perf_dir / "performance_metrics_5class.gen1_svm_svm_mil_v1.json"
     detail_path.write_text(json.dumps(detail, indent=2))
 
-    print(f"\n출력 파일:")
-    print(f"  predictions : {output_dir}/predictions/predicted_labels.gen1_svm_svm_mil_v1.csv")
-    print(f"  performance : {output_dir}/performance/performance_metrics.gen1_svm_svm_mil_v1.csv")
-    print(f"  performance : {detail_path}")
-    print(f"  model       : {model_path}")
-    print("\n" + "=" * 60)
-    print("shared_functions metrics_df:")
-    print(metrics_df.to_string(index=False))
-    print("=" * 60)
+    log("[Step 7/7] 완료")
+    log("=" * 55)
+    log("DONE: 모든 단계 완료")
+    log(f"  predictions : {output_dir}/predictions/predicted_labels.gen1_svm_svm_mil_v1.csv")
+    log(f"  performance : {output_dir}/performance/performance_metrics.gen1_svm_svm_mil_v1.csv")
+    log(f"  performance : {detail_path}")
+    log(f"  model       : {model_path}")
+    log("=" * 55)
+    print("\nshared_functions metrics_df:", flush=True)
+    print(metrics_df.to_string(index=False), flush=True)
 
 
 if __name__ == "__main__":

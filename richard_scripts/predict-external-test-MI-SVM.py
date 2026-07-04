@@ -8,7 +8,7 @@ sys.path.append(os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from shared_functions import (
     MISVM,
     SVMMILWrapper,
-    load_holdout_bags,
+    load_external_test_bags,
     predict_labels_and_report_performance,
 )
 
@@ -35,14 +35,14 @@ def parse_args():
 if __name__ == "__main__":
     args = parse_args()
     model = joblib.load(args.model_path)
-    holdout_bags = load_holdout_bags()
+    external_test_bags = load_external_test_bags()
     bag_df, metrics_df = predict_labels_and_report_performance(
         model=SVMMILWrapper(model),
-        holdout_bags=holdout_bags,
+        holdout_bags=external_test_bags,
         model_gen=args.model_gen,
-        model_name=args.model_name,
+        model_name=f"{args.model_name}_external_test_set",
         output_dir=PROJECT_ROOT,
     )
 
-    print("\n=== HOLDOUT METRICS ===")
+    print("\n=== EXTERNAL TEST SET METRICS ===")
     print(metrics_df.to_string(index=False))

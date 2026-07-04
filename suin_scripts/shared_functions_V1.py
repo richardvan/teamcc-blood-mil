@@ -31,14 +31,32 @@ class SVMMILWrapper(BaseMILWrapper):
     """
     Wrapper for Gen 1 SVM-style MIL models.
     Expects a fitted model with decision_function(instances).
+
+    aggregation:
+      - "max"           : bag score = max(decision_function(instances)); threshold vs 0.
+                          (original behavior, kept as default for backward compatibility)
+      - "frac_positive" : bag score = fraction of instances with decision_function > 0;
+                          threshold vs `threshold` param (default 0.5).
     """
-    def __init__(self, fitted_model):
+    def __init__(self, fitted_model, aggregation="max", threshold=None):
         self.model = fitted_model
+        if aggregation not in ("max", "frac_positive"):
+            raise ValueError(f"Unknown aggregation: {aggregation}")
+        self.aggregation = aggregation
+        # Different aggregations live on different scales, so the sensible
+        # default threshold differs. Doesn't make sense to reuse threshold=0
+        # for a [0,1]-scaled frac_positive score.
+        if threshold is None:
+            threshold = 0.0 if aggregation == "max" else 0.5
+        self.threshold = threshold
 
     def predict_bag(self, bag_instances):
         scores = self.model.decision_function(bag_instances)
-        pred_score = float(np.max(scores))
-        pred_label = int(pred_score > 0)
+        if self.aggregation == "max":
+            pred_score = float(np.max(scores))
+        else:  # frac_positive
+            pred_score = float(np.mean(scores > 0))
+        pred_label = int(pred_score > self.threshold)
         return {
             "pred_score": pred_score,
             "pred_label": pred_label,
