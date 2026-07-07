@@ -392,6 +392,8 @@ def main():
     print(f"\n  Classification report:\n{report}", flush=True)
 
     # 5-class 상세 지표 JSON 추가 저장
+    perf_dir = output_dir / "performance"
+    perf_dir.mkdir(parents=True, exist_ok=True)
     detail = {
         "model_gen":    "gen1_svm",
         "model_name":   "svm_mil_v1",

@@ -4,6 +4,7 @@ import time
 
 import joblib
 import numpy as np
+from sklearn.metrics import roc_auc_score
 
 sys.path.append(os.path.join(os.path.dirname(__file__), "..", "scripts"))
 from shared_functions import MISVM, load_bags_and_labels
@@ -23,18 +24,22 @@ PARAM_GRID = [
 CV_MAX_ITERATIONS = 5
 
 
-def bag_accuracy(model, bags, labels):
-    """Fraction of bags whose predicted label matches the true label."""
-    preds = model.predict_bags(bags)
-    return float(np.mean(np.array(preds) == np.array(labels)))
+def bag_auc(model, bags, labels):
+    """
+    ROC-AUC over bag-level scores (max instance decision score per bag) vs true labels.
+    Unlike accuracy, this doesn't depend on the decision threshold being well-calibrated
+    at 0, which is what let grid search pick an overconfident, poorly-generalizing C.
+    """
+    scores = [model.decision_function(bag).max() for bag in bags]
+    return float(roc_auc_score(labels, scores))
 
 
 def cross_validate(train_bags, train_labels, train_meta, param_grid, n_folds=N_FOLDS):
     """
     Grid search over param_grid using the fold_k_status columns already present
     in metadata.csv. For each candidate, fits an MISVM on each fold's train split
-    and evaluates bag-level accuracy on that fold's test split, then averages
-    across folds. Returns the params with the best average CV accuracy.
+    and evaluates bag-level ROC-AUC on that fold's test split, then averages
+    across folds. Returns the params with the best average CV AUC.
     """
     best_params = None
     best_score = -1.0
@@ -54,22 +59,29 @@ def cross_validate(train_bags, train_labels, train_meta, param_grid, n_folds=N_F
             fold_train_labels = [train_labels[i] for i in fold_train_idx]
             fold_test_bags = [train_bags[i] for i in fold_test_idx]
             fold_test_labels = [train_labels[i] for i in fold_test_idx]
+            if len(set(fold_test_labels)) < 2:
+                print(
+                    f"[CV] params={params} fold={k}/{n_folds} skipped "
+                    f"(test fold has only one class, AUC undefined)",
+                    flush=True,
+                )
+                continue
 
             model = MISVM(
                 kernel=params["kernel"], C=params["C"], max_iterations=CV_MAX_ITERATIONS
             )
             model.fit(fold_train_bags, fold_train_labels)
-            score = bag_accuracy(model, fold_test_bags, fold_test_labels)
+            score = bag_auc(model, fold_test_bags, fold_test_labels)
             fold_scores.append(score)
             print(
                 f"[CV] params={params} fold={k}/{n_folds} "
-                f"bag_accuracy={score:.4f}",
+                f"bag_auc={score:.4f}",
                 flush=True,
             )
 
         avg_score = float(np.mean(fold_scores)) if fold_scores else -1.0
-        cv_results.append({**params, "avg_cv_accuracy": avg_score})
-        print(f"[CV] params={params} avg_cv_accuracy={avg_score:.4f}", flush=True)
+        cv_results.append({**params, "avg_cv_auc": avg_score})
+        print(f"[CV] params={params} avg_cv_auc={avg_score:.4f}", flush=True)
 
         if avg_score > best_score:
             best_score = avg_score
@@ -88,7 +100,7 @@ if __name__ == "__main__":
     print("\n=== CV RESULTS ===", flush=True)
     for result in cv_results:
         print(result, flush=True)
-    print(f"\nBest params: {best_params} (avg CV accuracy={best_score:.4f})", flush=True)
+    print(f"\nBest params: {best_params} (avg CV AUC={best_score:.4f})", flush=True)
 
     print("\nRetraining on full training set with best params...", flush=True)
     model = MISVM(kernel=best_params["kernel"], C=best_params["C"], max_iterations=5)

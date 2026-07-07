@@ -271,6 +271,39 @@ def featurize_image(path):
 
     return np.concatenate(feats)
 
+def preprocess_image_for_cnn(path):
+    """
+    Load one cell image, apply foreground-aware normalization,
+    and return a float32 RGB NumPy array in [0, 1].
+
+    Steps performed:
+    1. Load image from disk.
+    2. Convert image to RGB.
+    3. Convert pixels to float32 in [0, 1].
+    4. Compute a foreground mask using compute_foreground_mask().
+    5. For each RGB channel, apply stretch_to_unit_range() using the foreground mask.
+    6. Return the normalized image array with original H x W x 3 shape preserved.
+
+    Steps NOT performed:
+    - No resizing
+    - No padding
+    - No tensor conversion
+    - No batching
+    - No data augmentation
+    - No ImageNet mean/std normalization
+
+    Returns:
+        np.ndarray of shape (H, W, 3), dtype float32, values in [0, 1]
+    """
+    img = Image.open(path).convert("RGB")
+    arr = np.asarray(img, dtype=np.float32) / 255.0
+    mask = compute_foreground_mask(arr)
+
+    arr_norm = np.empty_like(arr, dtype=np.float32)
+    for channel in range(3):
+        arr_norm[:, :, channel] = stretch_to_unit_range(arr[:, :, channel], mask)
+
+    return arr_norm
 
 # Both dataset loaders intentionally feed into the same featurizer so .tif and .bmp
 # inputs are normalized into the same feature space before training/evaluation.
