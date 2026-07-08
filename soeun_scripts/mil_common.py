@@ -133,6 +133,46 @@ def build_bag_objects(folders, feat_cache_dir: Path = FEAT_CACHE_DIR):
     return bags
 
 
+METADATA_PATH = PROJECT_DIR / "metadata.csv"
+
+
+def load_metadata(metadata_path: Path = METADATA_PATH):
+    """
+    metadata.csv 로드.
+    필수 컬럼: patient_id, folder, is_holdout, fold_1_status ~ fold_5_status
+      - is_holdout=True  → 최종 holdout(test) 환자, 어느 fold에도 포함 안 됨 (fold 컬럼 NaN)
+      - is_holdout=False → fold_k_status 컬럼값이 'train' 또는 'test'
+    """
+    import pandas as pd
+    if not metadata_path.exists():
+        raise FileNotFoundError(f"Not found: {metadata_path}")
+    df = pd.read_csv(metadata_path)
+    required = {"patient_id", "folder", "is_holdout"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"metadata.csv에 필요한 컬럼이 없습니다: {missing}")
+    return df
+
+
+def get_holdout_folders_from_metadata(meta_df) -> set:
+    """is_holdout=True 인 환자들의 folder명 집합."""
+    return set(meta_df.loc[meta_df["is_holdout"] == True, "folder"])
+
+
+def get_fold_split(meta_df, fold_num: int):
+    """
+    non-holdout 환자 중 fold_{fold_num}_status 컬럼 기준으로 train/test 폴더명 리스트 반환.
+    (5-fold 중 하나. is_holdout=True 환자는 애초에 fold 대상이 아님)
+    """
+    col = f"fold_{fold_num}_status"
+    if col not in meta_df.columns:
+        raise ValueError(f"metadata.csv에 '{col}' 컬럼이 없습니다.")
+    pool = meta_df.loc[meta_df["is_holdout"] == False]
+    train_folders = pool.loc[pool[col] == "train", "folder"].tolist()
+    test_folders  = pool.loc[pool[col] == "test",  "folder"].tolist()
+    return train_folders, test_folders
+
+
 def get_instance_filenames(folder: str, organized_dir: Path = ORGANIZED_DIR):
     """
     00_extract_cnn_features.py 와 동일한 정렬 규칙(sorted glob)으로

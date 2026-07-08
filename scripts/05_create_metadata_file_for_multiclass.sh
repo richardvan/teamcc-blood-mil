@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Generates metadata.csv from organized_data/, cv_splits/, and holdout_data/.
-# Requires 01_organize_the_data.sh, 02_create_holdout_and_cv_splits.sh to have been run.
+# Generates metadata_for_multiclass.csv from organized_data/, cv_splits_for_multiclass/, and holdout_data_for_multiclass/.
+# Requires 01_organize_the_data.sh, 04_create_holdout_and_cv_splits_for_multiclass.sh to have been run.
 #
 # Columns:
 #   patient_id, status, folder, instance_count, is_holdout,
 #   fold_1_status, fold_2_status, fold_3_status, fold_4_status, fold_5_status
 # For holdout patients, fold_X_status columns are set to NA.
+# `status` is the subtype (e.g. normal.control, cancer.CBFB_MYH11), not a binary label.
 
 set -euo pipefail
 
@@ -14,9 +15,9 @@ N_FOLDS=5
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 ORGANIZED="$PROJECT_DIR/organized_data"
-CV_DIR="$PROJECT_DIR/cv_splits"
-HOLDOUT_DIR="$PROJECT_DIR/holdout_data"
-METADATA="$PROJECT_DIR/metadata_for_binary.csv"
+CV_DIR="$PROJECT_DIR/cv_splits_for_multiclass"
+HOLDOUT_DIR="$PROJECT_DIR/holdout_data_for_multiclass"
+METADATA="$PROJECT_DIR/metadata_for_multiclass.csv"
 
 if [[ ! -d "$ORGANIZED" ]]; then
     echo "ERROR: organized_data not found. Run 01_organize_the_data.sh first."
@@ -24,13 +25,13 @@ if [[ ! -d "$ORGANIZED" ]]; then
 fi
 
 if [[ ! -d "$HOLDOUT_DIR" ]]; then
-    echo "ERROR: holdout_data not found. Run 02_create_holdout_and_cv_splits.sh first."
+    echo "ERROR: holdout_data_for_multiclass not found. Run 04_create_holdout_and_cv_splits_for_multiclass.sh first."
     exit 1
 fi
 
 for (( f=1; f<=N_FOLDS; f++ )); do
     if [[ ! -f "$CV_DIR/fold_$f/train_patients.txt" ]]; then
-        echo "ERROR: cv_splits/fold_$f not found. Run 02_create_holdout_and_cv_splits.sh first."
+        echo "ERROR: cv_splits_for_multiclass/fold_$f not found. Run 04_create_holdout_and_cv_splits_for_multiclass.sh first."
         exit 1
     fi
 done
@@ -86,8 +87,9 @@ for entry in sorted(os.listdir(organized)):
         continue  # skip unexpected entries
 
     label      = parts[0]                   # "normal" or "cancer"
+    subtype    = parts[1]                   # e.g. "control", "CBFB_MYH11"
     patient_id = parts[-1]                  # last segment, e.g. "AQK"
-    status     = 0 if label == "normal" else 1
+    status     = f"{label}.{subtype}"
 
     instance_count = sum(
         1 for fn in os.listdir(full_path) if fn.endswith(".tif")

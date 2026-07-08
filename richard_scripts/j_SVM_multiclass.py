@@ -1,83 +1,120 @@
+import time                                    ## NEW CODE
 import torch
 import numpy as np
-import glob, os, shutil, zipfile
+import glob, os, shutil, zipfile             ## OLD CODE
 import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 from PIL import Image
-from google.colab import drive
-from sklearn.preprocessing import LabelEncoder
+# from google.colab import drive                 ## OLD CODE
 
-drive.mount('/content/drive')
+# drive.mount('/content/drive')                 ## OLD CODE
 
-DATA_DIR = '/content/data'
-SAVE_DIR = '/content/drive/MyDrive/SVM/'
+# DATA_DIR = '/content/data'                     ## OLD CODE
+# SAVE_DIR = '/content/drive/MyDrive/SVM/'        ## OLD CODE
 
-shutil.copy('/content/drive/MyDrive/data.zip', '/content/data.zip')
-with zipfile.ZipFile('/content/data.zip', 'r') as z:
-  z.extractall('/content/data')
-print("complete")
+# shutil.copy('/content/drive/MyDrive/data.zip', '/content/data.zip')   ## OLD CODE
+# with zipfile.ZipFile('/content/data.zip', 'r') as z:                  ## OLD CODE
+#   z.extractall('/content/data')                                      ## OLD CODE
+# print("complete")                                                    ## OLD CODE
 
-image_paths = glob.glob(DATA_DIR + '/**/*.tif', recursive=True)
-print(len(image_paths))
+# image_paths = glob.glob(DATA_DIR + '/**/*.tif', recursive=True)       ## OLD CODE
+# print(len(image_paths))                                              ## OLD CODE
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
+DATA_DIR = '/home/sp00001/blood_mil_project/organized_data'          ## NEW CODE
+SAVE_DIR = '/home/sp00001/blood_mil_project/richard_scripts/SVM_multiclass/'    ## NEW CODE
+METADATA_PATH = '/home/sp00001/blood_mil_project/metadata_for_multiclass.csv'       ## NEW CODE
 
-patient_ids = [os.path.basename(os.path.dirname(p)) for p in image_paths]
+meta_df = pd.read_csv(METADATA_PATH)                                 ## NEW CODE
 
-transform = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-    transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
-])
+os.makedirs(SAVE_DIR, exist_ok=True)                                       ## NEW CODE
+X_PATH = os.path.join(SAVE_DIR, 'X.npy')                                   ## NEW CODE
+GROUPS_PATH = os.path.join(SAVE_DIR, 'groups.npy')                         ## NEW CODE
 
-class CellDataset(Dataset):
-  def __init__(self, paths, transform):
-    self.paths = paths
-    self.transform = transform
+if os.path.exists(X_PATH) and os.path.exists(GROUPS_PATH):                 ## NEW CODE
+  print("found existing features, loading", X_PATH, "and", GROUPS_PATH)    ## NEW CODE
+  X = np.load(X_PATH)                                                      ## NEW CODE
+  groups = np.load(GROUPS_PATH)                                            ## NEW CODE
+else:                                                                       ## NEW CODE
+  feature_extraction_start = time.time()                                   ## NEW CODE
+  image_paths = []                                                     ## NEW CODE
+  for folder_name in meta_df['folder']:                                ## NEW CODE
+    image_paths.extend(glob.glob(os.path.join(DATA_DIR, folder_name, '*.tif')))  ## NEW CODE
+  print(len(image_paths))                                              ## NEW CODE
 
-  def __len__(self):
-    return len(self.paths)
+  device = "cuda" if torch.cuda.is_available() else "cpu"
 
-  def __getitem__(self, i):
-    img = Image.open(self.paths[i]).convert("RGB")
-    return self.transform(img), i
+  patient_ids = [os.path.basename(os.path.dirname(p)) for p in image_paths]
 
-encoder = models.resnet50(weights="IMAGENET1K_V2")
-encoder.fc = torch.nn.Identity()
-encoder.eval()
-for p in encoder.parameters():
-  p.requires_grad = False
-encoder.to(device)
+  transform = transforms.Compose([
+      transforms.Resize((224, 224)),
+      transforms.ToTensor(),
+      transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
+  ])
 
-dataset = CellDataset(image_paths, transform)
-loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=2)
+  class CellDataset(Dataset):
+    def __init__(self, paths, transform):
+      self.paths = paths
+      self.transform = transform
 
-features = [None]*len(dataset)
+    def __len__(self):
+      return len(self.paths)
 
-with torch.no_grad():
-  for imgs, idx in loader:
-    out = encoder(imgs.to(device))
-    out = out.cpu().numpy()
-    for vector, i in zip(out, idx.numpy()):
-      features[i] = vector
+    def __getitem__(self, i):
+      img = Image.open(self.paths[i]).convert("RGB")
+      return self.transform(img), i
 
-X = np.stack(features)
-groups = np.array(patient_ids)
+  encoder = models.resnet50(weights="IMAGENET1K_V2")
+  encoder.fc = torch.nn.Identity()
+  encoder.eval()
+  for p in encoder.parameters():
+    p.requires_grad = False
+  encoder.to(device)
 
-os.makedirs(SAVE_DIR, exist_ok=True)
-np.save(SAVE_DIR + 'X.npy', X)
-np.save(SAVE_DIR + 'groups.npy', groups)
+  dataset = CellDataset(image_paths, transform)
+  loader = DataLoader(dataset, batch_size=64, shuffle=False, num_workers=2)
 
-X = np.load(SAVE_DIR + 'X.npy')
-groups = np.load(SAVE_DIR + 'groups.npy')
+  features = [None]*len(dataset)
 
-df = pd.read_excel(SAVE_DIR + 'metadata.xlsx', sheet_name='metadata')
-le = LabelEncoder()
-df['label'] = le.fit_transform(df['bag_label'])
+  with torch.no_grad():
+    for imgs, idx in loader:
+      out = encoder(imgs.to(device))
+      out = out.cpu().numpy()
+      for vector, i in zip(out, idx.numpy()):
+        features[i] = vector
 
-patient_label = dict(zip(df['patient_id'], df['label']))
+  X = np.stack(features)
+  groups = np.array(patient_ids)
+
+  np.save(X_PATH, X)                                                       ## NEW CODE
+  np.save(GROUPS_PATH, groups)                                             ## NEW CODE
+
+  feature_extraction_end = time.time()                                     ## NEW CODE
+  print("feature extraction took", feature_extraction_end - feature_extraction_start, "seconds")  ## NEW CODE
+
+# df = pd.read_excel(SAVE_DIR + 'metadata.xlsx', sheet_name='metadata')       ## OLD CODE
+# df['label'] = (df['bag_label'] != 'control').astype(int)                    ## OLD CODE
+# patient_label = dict(zip(df['patient_id'], df['label']))                    ## OLD CODE
+
+df = meta_df.copy()                                                     ## NEW CODE
+label_categories = sorted(df['status'].unique())                       ## NEW CODE (multiclass label encoding)
+label_to_int = {label: i for i, label in enumerate(label_categories)}  ## NEW CODE
+df['label'] = df['status'].map(label_to_int)                            ## NEW CODE (was binarized against 'normal' in binary script)
+patient_label = dict(zip(df['folder'], df['label']))                    ## NEW CODE
+HOLDOUT_PATH = '/home/sp00001/blood_mil_project/holdout_data_for_multiclass/holdout_patients.txt'  ## NEW CODE
+with open(HOLDOUT_PATH) as f:                                                        ## NEW CODE
+  holdout_patients = set(line.strip() for line in f if line.strip())                ## NEW CODE
+
+CV_SPLITS_DIR = '/home/sp00001/blood_mil_project/cv_splits_for_multiclass'          ## NEW CODE
+fold_covered_patients = set()                                        ## NEW CODE
+for fold_name in sorted(os.listdir(CV_SPLITS_DIR)):                  ## NEW CODE
+  fold_dir = os.path.join(CV_SPLITS_DIR, fold_name)                  ## NEW CODE
+  with open(os.path.join(fold_dir, 'test_patients.txt')) as f:       ## NEW CODE
+    fold_covered_patients.update(line.strip() for line in f if line.strip())  ## NEW CODE
+
 patients = np.unique(groups)
+patients = np.array([p for p in patients                                    ## NEW CODE
+                      if p not in holdout_patients and p in fold_covered_patients])  ## NEW CODE
 
 X_patient = []
 y_patient = []
@@ -94,15 +131,32 @@ y_patient = np.array(y_patient)
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
-from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV
+from sklearn.base import clone                                            ## NEW CODE
+from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV, cross_val_predict  ## NEW CODE (added cross_val_predict)
 from sklearn.metrics import balanced_accuracy_score, f1_score, confusion_matrix, classification_report
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X_patient, y_patient, test_size=0.2, stratify=y_patient, random_state=42)
+# X_train, X_test, y_train, y_test = train_test_split(                     ## OLD CODE
+#     X_patient, y_patient, test_size=0.2, stratify=y_patient, random_state=42)  ## OLD CODE
+
+X_train = X_patient                                                    ## NEW CODE
+y_train = y_patient                                                     ## NEW CODE
+
+patient_to_idx = {pid: i for i, pid in enumerate(patients)}           ## NEW CODE
+
+custom_cv = []                                                        ## NEW CODE
+for fold_name in sorted(os.listdir(CV_SPLITS_DIR)):                   ## NEW CODE
+  fold_dir = os.path.join(CV_SPLITS_DIR, fold_name)                   ## NEW CODE
+  with open(os.path.join(fold_dir, 'train_patients.txt')) as f:       ## NEW CODE
+    train_ids = [line.strip() for line in f if line.strip()]          ## NEW CODE
+  with open(os.path.join(fold_dir, 'test_patients.txt')) as f:        ## NEW CODE
+    test_ids = [line.strip() for line in f if line.strip()]           ## NEW CODE
+  train_idx = np.array([patient_to_idx[pid] for pid in train_ids])    ## NEW CODE
+  test_idx = np.array([patient_to_idx[pid] for pid in test_ids])      ## NEW CODE
+  custom_cv.append((train_idx, test_idx))                             ## NEW CODE
 
 pipe = Pipeline([
     ("scaler", StandardScaler()),
-    ("svm", SVC(class_weight="balanced")),
+    ("svm", SVC(class_weight="balanced")),                             ## NEW CODE (SVC uses one-vs-one for multiclass by default)
 ])
 
 param_grid = {
@@ -111,20 +165,53 @@ param_grid = {
     "svm__gamma" : ["scale", 0.01, 0.001],
 }
 
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-grid = GridSearchCV(pipe, param_grid, cv=cv,
+# cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)         ## OLD CODE
+grid = GridSearchCV(pipe, param_grid, cv=custom_cv,                       ## NEW CODE (cv=custom_cv instead of cv=cv)
                     scoring="balanced_accuracy", n_jobs=-1)
 
 grid.fit(X_train, y_train)
 
-pred = grid.predict(X_test)
+import joblib                                                             ## NEW CODE
+MODEL_PATH = os.path.join(SAVE_DIR, 'svm_best_model.joblib')              ## NEW CODE
+joblib.dump(grid.best_estimator_, MODEL_PATH)                             ## NEW CODE
+print("saved model to", MODEL_PATH)                                       ## NEW CODE
+
+# pred = grid.predict(X_test)                                             ## OLD CODE
+pred = cross_val_predict(grid.best_estimator_, X_train, y_train, cv=custom_cv)  ## NEW CODE
 
 print("best parameter:", grid.best_params_)
-print("balanced accuracy:", balanced_accuracy_score(y_test, pred))
-print("F1 score:", f1_score(y_test, pred, average="macro"))
-print(classification_report(y_test, pred))
-print(confusion_matrix(y_test, pred))
+print("best CV balanced accuracy:", grid.best_score_)                     ## NEW CODE
+# print("balanced accuracy:", balanced_accuracy_score(y_test, pred))       ## OLD CODE
+print("balanced accuracy:", balanced_accuracy_score(y_train, pred))       ## NEW CODE
+# print("F1 score:", f1_score(y_test, pred, average="macro"))              ## OLD CODE
+print("F1 score:", f1_score(y_train, pred, average="macro"))              ## NEW CODE
+# print(classification_report(y_test, pred))                               ## OLD CODE
+print(classification_report(y_train, pred, target_names=label_categories))  ## NEW CODE (labeled with class names)
+# print(confusion_matrix(y_test, pred))                                    ## OLD CODE
+print(confusion_matrix(y_train, pred))                                    ## NEW CODE
 
+REPORT_PATH = os.path.join(SAVE_DIR, 'classification_report.txt')         ## NEW CODE
+with open(REPORT_PATH, 'w') as f:                                          ## NEW CODE
+  f.write("=== Grid search results (mean balanced accuracy across folds) ===\n")  ## NEW CODE
+  results_order = np.argsort(-grid.cv_results_['mean_test_score'])        ## NEW CODE
+  for i in results_order:                                                 ## NEW CODE
+    f.write(f"{grid.cv_results_['params'][i]}: {grid.cv_results_['mean_test_score'][i]:.4f}\n")  ## NEW CODE
+  f.write(f"\nBest params: {grid.best_params_} (mean balanced accuracy: {grid.best_score_:.4f})\n\n")  ## NEW CODE
+
+  for fold_i, (train_idx, test_idx) in enumerate(custom_cv, start=1):      ## NEW CODE
+    fold_model = clone(pipe).set_params(**grid.best_params_)              ## NEW CODE
+    fold_model.fit(X_train[train_idx], y_train[train_idx])                ## NEW CODE
+    fold_pred = fold_model.predict(X_train[test_idx])                     ## NEW CODE
+    f.write(f"=== Fold {fold_i} ===\n")                                   ## NEW CODE
+    f.write(classification_report(y_train[test_idx], fold_pred, target_names=label_categories))  ## NEW CODE
+    f.write("\n")                                                         ## NEW CODE
+  f.write("=== Aggregate (all folds combined) ===\n")                     ## NEW CODE
+  f.write(classification_report(y_train, pred, target_names=label_categories))  ## NEW CODE
+print("saved classification report to", REPORT_PATH)                      ## NEW CODE
+
+CONF_MATRIX_PATH = os.path.join(SAVE_DIR, 'confusion_matrix.txt')         ## NEW CODE
+np.savetxt(CONF_MATRIX_PATH, confusion_matrix(y_train, pred), fmt='%d')  ## NEW CODE
+print("saved confusion matrix to", CONF_MATRIX_PATH)                      ## NEW CODE
 
 
 
@@ -156,9 +243,10 @@ import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 
 Z = PCA(n_components=2).fit_transform(StandardScaler().fit_transform(X_patient))
-for cls in np.unique(y_patient):
-    plt.scatter(Z[y_patient==cls, 0], Z[y_patient==cls, 1],
-                label=le.inverse_transform([cls])[0], alpha=.6)
-plt.legend(); plt.title("Patient embeddings (PCA, 5 subtypes)"); plt.show()
-
-
+for class_idx, class_name in enumerate(label_categories):              ## NEW CODE (loop over all classes instead of hardcoded control/AML)
+  plt.scatter(Z[y_patient==class_idx,0], Z[y_patient==class_idx,1], label=class_name, alpha=.6)  ## NEW CODE
+plt.legend(); plt.title("Patient embeddings (PCA)")
+PCA_PLOT_PATH = os.path.join(SAVE_DIR, 'pca_plot.png')                    ## NEW CODE
+plt.savefig(PCA_PLOT_PATH)                                                 ## NEW CODE
+print("saved PCA plot to", PCA_PLOT_PATH)                                  ## NEW CODE
+plt.show()

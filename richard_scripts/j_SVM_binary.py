@@ -6,7 +6,7 @@ import pandas as pd
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 from PIL import Image
-from google.colab import drive                 ## OLD CODE
+# from google.colab import drive                 ## OLD CODE
 
 # drive.mount('/content/drive')                 ## OLD CODE
 
@@ -22,8 +22,8 @@ from google.colab import drive                 ## OLD CODE
 # print(len(image_paths))                                              ## OLD CODE
 
 DATA_DIR = '/home/sp00001/blood_mil_project/organized_data'          ## NEW CODE
-SAVE_DIR = '/home/sp00001/blood_mil_project/richard_scripts/SVM/'    ## NEW CODE
-METADATA_PATH = os.path.join(DATA_DIR, 'metadata.csv')               ## NEW CODE
+SAVE_DIR = '/home/sp00001/blood_mil_project/richard_scripts/SVM_binary/'    ## NEW CODE
+METADATA_PATH = '/home/sp00001/blood_mil_project/metadata_for_binary.csv'                  ## NEW CODE
 
 meta_df = pd.read_csv(METADATA_PATH)                                 ## NEW CODE
 
@@ -38,7 +38,7 @@ if os.path.exists(X_PATH) and os.path.exists(GROUPS_PATH):                 ## NE
 else:                                                                       ## NEW CODE
   feature_extraction_start = time.time()                                   ## NEW CODE
   image_paths = []                                                     ## NEW CODE
-  for folder_name in meta_df['folder_name']:                           ## NEW CODE
+  for folder_name in meta_df['folder']:                                ## NEW CODE
     image_paths.extend(glob.glob(os.path.join(DATA_DIR, folder_name, '*.tif')))  ## NEW CODE
   print(len(image_paths))                                              ## NEW CODE
 
@@ -97,14 +97,22 @@ else:                                                                       ## N
 # patient_label = dict(zip(df['patient_id'], df['label']))                    ## OLD CODE
 
 df = meta_df.copy()                                                     ## NEW CODE
-df['label'] = (df['label'] != 'normal').astype(int)                     ## NEW CODE
-patient_label = dict(zip(df['folder_name'], df['label']))               ## NEW CODE
+df['label'] = df['status'].astype(int)                                  ## NEW CODE (metadata_for_binary.csv already encodes status as 0=normal/1=cancer)
+patient_label = dict(zip(df['folder'], df['label']))                    ## NEW CODE
 HOLDOUT_PATH = '/home/sp00001/blood_mil_project/holdout_data/holdout_patients.txt'  ## NEW CODE
 with open(HOLDOUT_PATH) as f:                                                        ## NEW CODE
   holdout_patients = set(line.strip() for line in f if line.strip())                ## NEW CODE
 
+CV_SPLITS_DIR = '/home/sp00001/blood_mil_project/cv_splits'          ## NEW CODE
+fold_covered_patients = set()                                        ## NEW CODE
+for fold_name in sorted(os.listdir(CV_SPLITS_DIR)):                  ## NEW CODE
+  fold_dir = os.path.join(CV_SPLITS_DIR, fold_name)                  ## NEW CODE
+  with open(os.path.join(fold_dir, 'test_patients.txt')) as f:       ## NEW CODE
+    fold_covered_patients.update(line.strip() for line in f if line.strip())  ## NEW CODE
+
 patients = np.unique(groups)
-patients = np.array([p for p in patients if p not in holdout_patients])             ## NEW CODE
+patients = np.array([p for p in patients                                    ## NEW CODE
+                      if p not in holdout_patients and p in fold_covered_patients])  ## NEW CODE
 
 X_patient = []
 y_patient = []
@@ -121,6 +129,7 @@ y_patient = np.array(y_patient)
 from sklearn.svm import SVC
 from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.base import clone                                            ## NEW CODE
 from sklearn.model_selection import train_test_split, StratifiedKFold, GridSearchCV, cross_val_predict  ## NEW CODE (added cross_val_predict)
 from sklearn.metrics import balanced_accuracy_score, f1_score, confusion_matrix, classification_report
 
@@ -130,7 +139,6 @@ from sklearn.metrics import balanced_accuracy_score, f1_score, confusion_matrix,
 X_train = X_patient                                                    ## NEW CODE
 y_train = y_patient                                                     ## NEW CODE
 
-CV_SPLITS_DIR = '/home/sp00001/blood_mil_project/cv_splits'          ## NEW CODE
 patient_to_idx = {pid: i for i, pid in enumerate(patients)}           ## NEW CODE
 
 custom_cv = []                                                        ## NEW CODE
@@ -182,6 +190,20 @@ print(confusion_matrix(y_train, pred))                                    ## NEW
 
 REPORT_PATH = os.path.join(SAVE_DIR, 'classification_report.txt')         ## NEW CODE
 with open(REPORT_PATH, 'w') as f:                                          ## NEW CODE
+  f.write("=== Grid search results (mean balanced accuracy across folds) ===\n")  ## NEW CODE
+  results_order = np.argsort(-grid.cv_results_['mean_test_score'])        ## NEW CODE
+  for i in results_order:                                                 ## NEW CODE
+    f.write(f"{grid.cv_results_['params'][i]}: {grid.cv_results_['mean_test_score'][i]:.4f}\n")  ## NEW CODE
+  f.write(f"\nBest params: {grid.best_params_} (mean balanced accuracy: {grid.best_score_:.4f})\n\n")  ## NEW CODE
+
+  for fold_i, (train_idx, test_idx) in enumerate(custom_cv, start=1):      ## NEW CODE
+    fold_model = clone(pipe).set_params(**grid.best_params_)              ## NEW CODE
+    fold_model.fit(X_train[train_idx], y_train[train_idx])                ## NEW CODE
+    fold_pred = fold_model.predict(X_train[test_idx])                     ## NEW CODE
+    f.write(f"=== Fold {fold_i} ===\n")                                   ## NEW CODE
+    f.write(classification_report(y_train[test_idx], fold_pred))          ## NEW CODE
+    f.write("\n")                                                         ## NEW CODE
+  f.write("=== Aggregate (all folds combined) ===\n")                     ## NEW CODE
   f.write(classification_report(y_train, pred))                           ## NEW CODE
 print("saved classification report to", REPORT_PATH)                      ## NEW CODE
 

@@ -47,15 +47,8 @@ from PIL import Image
 from sklearn.metrics import classification_report, confusion_matrix, balanced_accuracy_score
 from torchvision import models, transforms
 
-# Label order is NOT hardcoded here anymore -- it comes from shared_functions_V2.py,
-# which is the team's single source of truth (other generations' scripts read the
-# same constant). Do not redefine this list independently; if it ever needs to
-# change, change it in shared_functions_V2.py so every generation stays in sync.
-# shared_functions_V2.py must be importable (same directory, or on PYTHONPATH).
-from shared_functions_V2 import SUBTYPE_TO_LABEL, LABEL_TO_SUBTYPE
-
-CLASSES = [LABEL_TO_SUBTYPE[i] for i in range(len(SUBTYPE_TO_LABEL))]
-CLASS_TO_IDX = SUBTYPE_TO_LABEL
+CLASSES = ["control", "CBFB_MYH11", "NPM1", "PML_RARA", "RUNX1_RUNX1T1"]
+CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}
 N_CLASSES = len(CLASSES)
 
 
@@ -72,9 +65,6 @@ def parse_args():
     p.add_argument("--unfreeze_from", default="layer4",
                    choices=["layer4", "layer3", "all", "none"],
                    help="Which ResNet50 blocks to unfreeze for fine-tuning.")
-    p.add_argument("--pooling", default="mean",
-                   choices=["mean", "max", "min", "min_max"],
-                   help="Bag pooling function. min_max concatenates min+max (4096-dim input to classifier).")
     p.add_argument("--epochs", type=int, default=30)
     p.add_argument("--lr_head", type=float, default=1e-2)
     p.add_argument("--lr_backbone", type=float, default=1e-4,
@@ -127,30 +117,13 @@ def load_patient_lists(args):
 # ------------------------------------------------------------------
 # Model: partially fine-tuned ResNet50 + mean-pooling MIL head
 # ------------------------------------------------------------------
-def pool_features(feats, pooling):
-    """feats: (n_cells, 2048) -> (1, in_dim) bag vector, in_dim depends on pooling."""
-    if pooling == "mean":
-        return feats.mean(dim=0, keepdim=True)
-    if pooling == "max":
-        return feats.max(dim=0, keepdim=True).values
-    if pooling == "min":
-        return feats.min(dim=0, keepdim=True).values
-    if pooling == "min_max":
-        mn = feats.min(dim=0, keepdim=True).values
-        mx = feats.max(dim=0, keepdim=True).values
-        return torch.cat([mn, mx], dim=1)
-    raise ValueError(f"Unknown pooling: {pooling}")
-
-
 class CNN_MIL(nn.Module):
-    def __init__(self, unfreeze_from="layer4", pooling="mean"):
+    def __init__(self, unfreeze_from="layer4"):
         super().__init__()
         backbone = models.resnet50(weights=models.ResNet50_Weights.IMAGENET1K_V2)
         backbone.fc = nn.Identity()
         self.backbone = backbone
-        self.pooling = pooling
-        in_dim = 4096 if pooling == "min_max" else 2048
-        self.classifier = nn.Linear(in_dim, N_CLASSES)
+        self.classifier = nn.Linear(2048, N_CLASSES)
         self._set_trainable(unfreeze_from)
 
     def _set_trainable(self, unfreeze_from):
@@ -173,9 +146,9 @@ class CNN_MIL(nn.Module):
 
     def forward(self, images):
         """images: (n_cells, 3, 224, 224) for ONE patient's (sampled) cells."""
-        feats = self.backbone(images)              # (n_cells, 2048)
-        bag_vec = pool_features(feats, self.pooling)  # (1, in_dim)
-        scores = self.classifier(bag_vec)           # (1, n_classes)
+        feats = self.backbone(images)           # (n_cells, 2048)
+        bag_vec = feats.mean(dim=0, keepdim=True)  # mean-pooling
+        scores = self.classifier(bag_vec)        # (1, n_classes)
         return scores
 
 
@@ -233,7 +206,7 @@ def predict_patient(model, organized_dir, folder_name, image_ext, device, eval_b
         x = load_images(batch_paths, PREPROCESS_EVAL).to(device)
         feats.append(model.backbone(x))
     feats = torch.cat(feats, dim=0)
-    bag_vec = pool_features(feats, model.pooling)
+    bag_vec = feats.mean(dim=0, keepdim=True)
     scores = model.classifier(bag_vec)
     return scores
 
@@ -291,7 +264,7 @@ def main():
         print(f"WARNING: these classes have ZERO training patients in fold {args.fold}: {missing}. "
               f"The model cannot learn them from this fold.")
 
-    model = CNN_MIL(unfreeze_from=args.unfreeze_from, pooling=args.pooling).to(device)
+    model = CNN_MIL(unfreeze_from=args.unfreeze_from).to(device)
 
     if args.use_hinge_loss:
         # weight expects a float tensor matching class order
@@ -333,22 +306,19 @@ def main():
     hold_cm, hold_report, hold_bal_acc = full_report(model, args.organized_dir, holdout_ids, labels,
                                                        args.image_ext, device, "Holdout (final)")
 
-    tag = f"fold{args.fold}_{args.pooling}"
-    model_path = os.path.join(args.model_dir, f"cnn_mil_{tag}.pt")
+    model_path = os.path.join(args.model_dir, f"cnn_mil_fold{args.fold}.pt")
     torch.save({
         "state_dict": model.state_dict(),
         "unfreeze_from": args.unfreeze_from,
-        "pooling": args.pooling,
         "classes": CLASSES,
         "fold": args.fold,
         "instances_per_step": args.instances_per_step,
     }, model_path)
     print("Saved model:", model_path)
 
-    with open(os.path.join(args.model_dir, f"holdout_report_{tag}.json"), "w") as f:
+    with open(os.path.join(args.model_dir, f"holdout_report_fold{args.fold}.json"), "w") as f:
         json.dump({
             "fold": args.fold,
-            "pooling": args.pooling,
             "best_val_balanced_accuracy": val_bal_acc,
             "holdout_balanced_accuracy": hold_bal_acc,
             "holdout_confusion_matrix": hold_cm.tolist(),
@@ -357,7 +327,7 @@ def main():
             "instances_per_step": args.instances_per_step,
             "use_hinge_loss": args.use_hinge_loss,
         }, f, indent=2)
-    with open(os.path.join(args.model_dir, f"holdout_classification_report_{tag}.txt"), "w") as f:
+    with open(os.path.join(args.model_dir, f"holdout_classification_report_fold{args.fold}.txt"), "w") as f:
         f.write(hold_report)
     print(f"Saved results to: {args.model_dir}")
 
