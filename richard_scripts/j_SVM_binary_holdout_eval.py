@@ -166,6 +166,9 @@ plt.scatter(Z_train[y_train_patient==1,0], Z_train[y_train_patient==1,1], label=
 plt.scatter(Z_holdout[y_patient==0,0], Z_holdout[y_patient==0,1], label="holdout: control", marker="x", s=100, c="tab:blue")
 plt.scatter(Z_holdout[y_patient==1,0], Z_holdout[y_patient==1,1], label="holdout: AML", marker="x", s=100, c="tab:orange")
 plt.legend(); plt.title("Holdout patient embeddings (PCA, fit on training set)")
+var_pct = pca.explained_variance_ratio_ * 100
+plt.xlabel(f"PC1 ({var_pct[0]:.0f}%)")
+plt.ylabel(f"PC2 ({var_pct[1]:.0f}%)")
 PCA_PLOT_PATH = os.path.join(SAVE_DIR, 'holdout_pca_plot.png')
 plt.savefig(PCA_PLOT_PATH)
 print("saved holdout PCA plot to", PCA_PLOT_PATH)

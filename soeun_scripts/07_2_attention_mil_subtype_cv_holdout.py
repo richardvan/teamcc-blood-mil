@@ -244,6 +244,8 @@ def main():
     parser.add_argument("--n_folds", type=int, default=5)
     parser.add_argument("--top_k", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--metadata_file", type=str, default="metadata_for_multiclass.csv",
+                        help="PROJECT_DIR 바로 아래 위치한 metadata csv 파일명")
     parser.add_argument("--model_name", type=str, default="attention_mil_cv_v1")
     args = parser.parse_args()
 
@@ -259,8 +261,8 @@ def main():
     log("=" * 55)
 
     # ── Step 1: metadata 로드 ───────────────────────────────────
-    log("[Step 1/9] metadata.csv 로드 중...")
-    meta = load_metadata()
+    log(f"[Step 1/9] {args.metadata_file} 로드 중...")
+    meta = load_metadata(PROJECT_DIR / args.metadata_file)
     holdout_folders = get_holdout_folders_from_metadata(meta)
     log(f"[Step 1/9] 완료 — 전체 {len(meta)}명, holdout {len(holdout_folders)}명")
 

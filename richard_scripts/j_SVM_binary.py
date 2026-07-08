@@ -241,10 +241,15 @@ print("shuffled    :", np.round(shuf, 3), "mean", np.mean(shuf).round(3))
 import matplotlib.pyplot as plt
 from sklearn.decomposition import PCA
 
-Z = PCA(n_components=2).fit_transform(StandardScaler().fit_transform(X_patient))
-plt.scatter(Z[y_patient==0,0], Z[y_patient==0,1], label="control", alpha=.6)
-plt.scatter(Z[y_patient==1,0], Z[y_patient==1,1], label="AML", alpha=.6)
+X_patient_scaled = StandardScaler().fit_transform(X_patient)
+pca = PCA(n_components=2).fit(X_patient_scaled)
+Z_pca = pca.transform(X_patient_scaled)
+plt.scatter(Z_pca[y_patient==0,0], Z_pca[y_patient==0,1], label="control", alpha=.6)
+plt.scatter(Z_pca[y_patient==1,0], Z_pca[y_patient==1,1], label="AML", alpha=.6)
 plt.legend(); plt.title("Patient embeddings (PCA)")
+var_pct = pca.explained_variance_ratio_ * 100
+plt.xlabel(f"PC1 ({var_pct[0]:.0f}%)")
+plt.ylabel(f"PC2 ({var_pct[1]:.0f}%)")
 PCA_PLOT_PATH = os.path.join(SAVE_DIR, 'pca_plot.png')                    ## NEW CODE
 plt.savefig(PCA_PLOT_PATH)                                                 ## NEW CODE
 print("saved PCA plot to", PCA_PLOT_PATH)                                  ## NEW CODE
