@@ -24,6 +24,9 @@ import argparse
 import json
 
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
 import torch
 from sklearn.preprocessing import StandardScaler
 from sklearn.decomposition import PCA
@@ -36,7 +39,10 @@ from mil_common import (
     log, build_bag_objects, get_instance_filenames,
     load_metadata, get_holdout_folders_from_metadata,
 )
-from attention_mil_common import AttentionMIL, AttentionMILWrapper
+from attention_mil_common import (
+    AttentionMIL, AttentionMILWrapper, compute_auc_macro, compute_auc_per_class,
+    compute_roc_curve_points,
+)
 
 from shared_functions_V2 import predict_labels_and_report_performance
 
@@ -82,11 +88,43 @@ def main():
     log("[3] holdout 예측 중...")
     y_true = np.array([b.true_label for b in holdout_bags])
     y_pred = np.array([wrapper.predict_bag(b.instances)["pred_label"] for b in holdout_bags])
+    y_proba = np.array([wrapper.predict_bag_proba(b.instances) for b in holdout_bags])
 
     bacc = balanced_accuracy_score(y_true, y_pred)
     f1m  = f1_score(y_true, y_pred, average="macro", zero_division=0)
+    auc_macro = compute_auc_macro(y_true, y_proba, N_CLASSES)
+    auc_per_class = compute_auc_per_class(y_true, y_proba, N_CLASSES)
     log(f"[3] holdout balanced accuracy: {bacc:.3f}")
     log(f"[3] holdout F1 (macro)       : {f1m:.3f}")
+    log(f"[3] holdout AUC (macro, OvR) : {auc_macro:.3f}")
+    for c, name in enumerate(CLASS_NAMES):
+        log(f"       AUC[{name:<16}]: {auc_per_class[c]:.3f}")
+
+    auc_path = save_dir / "holdout_auc_metrics.json"
+    auc_path.write_text(json.dumps({
+        "auc_macro": auc_macro,
+        "auc_per_class": {CLASS_NAMES[c]: v for c, v in auc_per_class.items()},
+    }, indent=2))
+    log(f"  holdout AUC 결과 저장 → {auc_path}")
+
+    roc_df = compute_roc_curve_points(y_true, y_proba, N_CLASSES, CLASS_NAMES)
+    roc_path = save_dir / "holdout_roc_curve_points.csv"
+    roc_df.to_csv(roc_path, index=False)
+    log(f"  holdout ROC curve 좌표 저장 → {roc_path}")
+
+    plt.figure()
+    for cls_name, g in roc_df.groupby("class"):
+        auc_val = auc_per_class[CLASS_NAMES.index(cls_name)]
+        plt.plot(g["fpr"], g["tpr"], label=f"{cls_name} (AUC={auc_val:.3f})")
+    plt.plot([0, 1], [0, 1], "--", color="gray", label="chance")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title(f"ROC curves (holdout, macro AUC={auc_macro:.3f})")
+    plt.legend(fontsize=8)
+    roc_plot_path = save_dir / "holdout_roc_curve_plot.png"
+    plt.savefig(roc_plot_path, bbox_inches="tight")
+    plt.close()
+    log(f"  holdout ROC curve plot 저장 → {roc_plot_path}")
 
     report = classification_report(
         y_true, y_pred, labels=list(range(N_CLASSES)),
@@ -167,12 +205,31 @@ def main():
     })
     pca_csv_path = save_dir / "holdout_pca_coords.csv"
     pd.concat([train_df, holdout_df], ignore_index=True).to_csv(pca_csv_path, index=False)
-    log(f"[6] PCA 좌표 저장 → {pca_csv_path} (그림은 별도로 그려야 함, matplotlib 미사용)")
+    log(f"[6] PCA 좌표 저장 → {pca_csv_path}")
+
+    colors = plt.cm.tab10(np.linspace(0, 1, N_CLASSES))
+    plt.figure()
+    for class_idx, class_name in enumerate(CLASS_NAMES):
+        tm = y_train == class_idx
+        hm = y_true == class_idx
+        plt.scatter(Z_train[tm, 0], Z_train[tm, 1],
+                    label=f"train: {class_name}", alpha=.3, c=[colors[class_idx]])
+        plt.scatter(Z_holdout[hm, 0], Z_holdout[hm, 1],
+                    label=f"holdout: {class_name}", marker="x", s=100, c=[colors[class_idx]])
+    plt.legend(fontsize=7)
+    plt.title("Holdout patient bag embeddings (PCA, fit on training set)")
+    pca_plot_path = save_dir / "holdout_pca_plot.png"
+    plt.savefig(pca_plot_path, bbox_inches="tight")
+    plt.close()
+    log(f"[6] PCA plot 저장 → {pca_plot_path}")
 
     log("=" * 55)
     log("DONE: holdout 평가 완료")
     log(f"  balanced_accuracy : {bacc:.3f}")
     log(f"  f1_macro          : {f1m:.3f}")
+    log(f"  auc_macro         : {auc_macro:.3f}")
+    log(f"  roc_curve_plot    : {roc_plot_path}")
+    log(f"  pca_plot          : {pca_plot_path}")
     log("=" * 55)
 
 

@@ -32,6 +32,9 @@ import argparse
 import json
 
 import numpy as np
+import matplotlib
+matplotlib.use("Agg")   # 서버(디스플레이 없음)에서 안전하게 그림 저장
+import matplotlib.pyplot as plt
 import torch
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
@@ -48,6 +51,7 @@ from mil_common import (
 )
 from attention_mil_common import (
     AttentionMIL, AttentionMILWrapper, evaluate, train_model, relabel_bags,
+    compute_auc_macro, compute_auc_per_class, compute_roc_curve_points,
 )
 
 
@@ -86,7 +90,7 @@ def quick_eval(bags, seed, args, device, shuffle_labels=False, epochs=30):
         epochs=epochs, lr=args.lr, weight_decay=args.weight_decay,
         class_weights=class_weights, verbose=False, use_early_stopping=False,
     )
-    _, _, y_true, y_pred = evaluate(model, test_bags, device)
+    _, _, y_true, y_pred, _ = evaluate(model, test_bags, device)
     return balanced_accuracy_score(y_true, y_pred)
 
 
@@ -136,6 +140,8 @@ def main():
     log(f"[2] {args.n_folds}-fold CV 시작...")
     fold_reports = []
     agg_y_true, agg_y_pred = [], []
+    agg_y_proba = []
+    fold_aucs = []
 
     for fold in range(1, args.n_folds + 1):
         train_folders, test_folders = get_fold_split(meta, fold)
@@ -155,9 +161,13 @@ def main():
             epochs=args.epochs, lr=args.lr, weight_decay=args.weight_decay,
             class_weights=class_weights, patience=args.patience, verbose=False,
         )
-        _, _, y_true, y_pred = evaluate(model, fold_test_bags, device)
+        _, _, y_true, y_pred, y_proba = evaluate(model, fold_test_bags, device)
         agg_y_true.extend(y_true.tolist())
         agg_y_pred.extend(y_pred.tolist())
+        agg_y_proba.extend(y_proba.tolist())
+
+        fold_auc = compute_auc_macro(y_true, y_proba, N_CLASSES)
+        fold_aucs.append(fold_auc)
 
         fold_report = classification_report(
             y_true, y_pred, labels=list(range(N_CLASSES)),
@@ -165,12 +175,16 @@ def main():
         )
         fold_reports.append((fold, fold_report))
         bacc = balanced_accuracy_score(y_true, y_pred)
-        log(f"  Fold {fold}: n_test={len(fold_test_bags)} | balanced_acc={bacc:.3f}")
+        log(f"  Fold {fold}: n_test={len(fold_test_bags)} | balanced_acc={bacc:.3f} | auc_macro={fold_auc:.3f}")
 
-    agg_y_true, agg_y_pred = np.array(agg_y_true), np.array(agg_y_pred)
+    agg_y_true  = np.array(agg_y_true)
+    agg_y_pred  = np.array(agg_y_pred)
+    agg_y_proba = np.array(agg_y_proba)
     agg_bacc = balanced_accuracy_score(agg_y_true, agg_y_pred)
     agg_f1   = f1_score(agg_y_true, agg_y_pred, average="macro", zero_division=0)
-    log(f"[2] CV 완료 — aggregate balanced_acc={agg_bacc:.3f} | f1_macro={agg_f1:.3f}")
+    agg_auc  = compute_auc_macro(agg_y_true, agg_y_proba, N_CLASSES)
+    agg_auc_per_class = compute_auc_per_class(agg_y_true, agg_y_proba, N_CLASSES)
+    log(f"[2] CV 완료 — aggregate balanced_acc={agg_bacc:.3f} | f1_macro={agg_f1:.3f} | auc_macro={agg_auc:.3f}")
 
     # classification_report.txt (팀원 코드와 동일한 구성: 각 fold + aggregate)
     report_path = save_dir / "classification_report.txt"
@@ -190,6 +204,33 @@ def main():
     cm = confusion_matrix(agg_y_true, agg_y_pred, labels=list(range(N_CLASSES)))
     np.savetxt(cm_path, cm, fmt="%d")
     log(f"  confusion_matrix 저장 → {cm_path}")
+
+    auc_path = save_dir / "auc_metrics.json"
+    auc_path.write_text(json.dumps({
+        "per_fold_auc_macro": fold_aucs,
+        "aggregate_auc_macro": agg_auc,
+        "aggregate_auc_per_class": {CLASS_NAMES[c]: v for c, v in agg_auc_per_class.items()},
+    }, indent=2))
+    log(f"  AUC 결과 저장 → {auc_path}")
+
+    roc_df = compute_roc_curve_points(agg_y_true, agg_y_proba, N_CLASSES, CLASS_NAMES)
+    roc_path = save_dir / "roc_curve_points.csv"
+    roc_df.to_csv(roc_path, index=False)
+    log(f"  ROC curve 좌표 저장 → {roc_path}")
+
+    plt.figure()
+    for cls_name, g in roc_df.groupby("class"):
+        auc_val = agg_auc_per_class[CLASS_NAMES.index(cls_name)]
+        plt.plot(g["fpr"], g["tpr"], label=f"{cls_name} (AUC={auc_val:.3f})")
+    plt.plot([0, 1], [0, 1], "--", color="gray", label="chance")
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title(f"ROC curves (5-fold CV aggregate, macro AUC={agg_auc:.3f})")
+    plt.legend(fontsize=8)
+    roc_plot_path = save_dir / "roc_curve_plot.png"
+    plt.savefig(roc_plot_path, bbox_inches="tight")
+    plt.close()
+    log(f"  ROC curve plot 저장 → {roc_plot_path}")
 
     # ── 최종 모델 학습 (non-holdout 전체) ───────────────────────
     log("[3] 최종 모델 학습 시작 (non-holdout 전체 사용)...")
@@ -276,14 +317,30 @@ def main():
     })
     pca_csv_path = save_dir / "pca_coords.csv"
     pca_df.to_csv(pca_csv_path, index=False)
-    log(f"[5] PCA 좌표 저장 → {pca_csv_path} (그림은 별도로 그려야 함, matplotlib 미사용)")
+    log(f"[5] PCA 좌표 저장 → {pca_csv_path}")
+
+    colors = plt.cm.tab10(np.linspace(0, 1, N_CLASSES))
+    plt.figure()
+    for class_idx, class_name in enumerate(CLASS_NAMES):
+        mask = labels == class_idx
+        plt.scatter(Z[mask, 0], Z[mask, 1], label=class_name, alpha=.6, c=[colors[class_idx]])
+    plt.legend()
+    plt.title("Patient bag embeddings (Attention-pooled, PCA)")
+    pca_plot_path = save_dir / "pca_plot.png"
+    plt.savefig(pca_plot_path, bbox_inches="tight")
+    plt.close()
+    log(f"[5] PCA plot 저장 → {pca_plot_path}")
 
     log("=" * 55)
     log("DONE: 학습 완료")
     log(f"  model               : {model_path}")
     log(f"  classification_report: {report_path}")
     log(f"  confusion_matrix    : {cm_path}")
+    log(f"  auc_metrics         : {auc_path}")
+    log(f"  roc_curve_points    : {roc_path}")
+    log(f"  roc_curve_plot      : {roc_plot_path}")
     log(f"  pca_coords          : {pca_csv_path}")
+    log(f"  pca_plot            : {pca_plot_path}")
     log("=" * 55)
 
 

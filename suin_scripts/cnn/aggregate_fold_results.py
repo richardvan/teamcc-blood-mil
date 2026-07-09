@@ -25,17 +25,7 @@ import pandas as pd
 POOLINGS = ["mean", "max", "min_max"]
 
 
-def load_all(model_dir, split="val"):
-    """split='val': the fold's own test partition -- now the OFFICIAL final
-    metric per team decision (holdout_data_for_multiclass is currently unused).
-    split='holdout': the old fixed 28-patient holdout, kept only for reference."""
-    prefix = "val" if split == "val" else "holdout"
-    bal_acc_key = "best_val_balanced_accuracy" if split == "val" else "holdout_balanced_accuracy"
-    report_key = f"{prefix}_per_class_report"
-    auc_macro_key = f"{prefix}_auc_macro"
-    auc_weighted_key = f"{prefix}_auc_weighted"
-    auc_per_class_key = f"{prefix}_auc_per_class"
-
+def load_all(model_dir):
     rows = []
     for pooling in POOLINGS:
         for fold in range(1, 6):
@@ -48,19 +38,14 @@ def load_all(model_dir, split="val"):
             row = {
                 "pooling": pooling,
                 "fold": fold,
-                f"{prefix}_balanced_accuracy": d[bal_acc_key],
-                f"{prefix}_auc_macro": d.get(auc_macro_key),
-                f"{prefix}_auc_weighted": d.get(auc_weighted_key),
+                "holdout_balanced_accuracy": d["holdout_balanced_accuracy"],
             }
-            per_class = d.get(report_key, {})
+            per_class = d.get("holdout_per_class_report", {})
             for cls_name, cls_metrics in per_class.items():
                 if cls_name in ("accuracy", "macro avg", "weighted avg"):
                     continue
                 row[f"recall_{cls_name}"] = cls_metrics["recall"]
                 row[f"f1_{cls_name}"] = cls_metrics["f1-score"]
-            auc_per_class = d.get(auc_per_class_key, {})
-            for cls_name, auc_val in auc_per_class.items():
-                row[f"auc_{cls_name}"] = auc_val
             rows.append(row)
     return pd.DataFrame(rows)
 
@@ -68,17 +53,13 @@ def load_all(model_dir, split="val"):
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--model_dir", default="/home/sp00001/blood_mil_project/models/gen2_cnn")
-    p.add_argument("--split", choices=["val", "holdout"], default="val",
-                   help="val = each fold's own test partition (now the OFFICIAL metric "
-                        "per team decision). holdout = old fixed 28-patient set, reference only.")
     p.add_argument("--output_csv", default=None)
     args = p.parse_args()
 
-    df = load_all(args.model_dir, split=args.split)
+    df = load_all(args.model_dir)
     if df.empty:
         print("No reports found -- have the 15 jobs finished?")
         return
-    print(f"(using split='{args.split}' as the metric source)\n")
 
     metric_cols = [c for c in df.columns if c not in ("pooling", "fold")]
 

@@ -166,12 +166,22 @@ Z_train = pca.transform(scaler.transform(X_train_patient))
 Z_holdout = pca.transform(scaler.transform(X_patient))
 
 colors = plt.cm.tab10(np.linspace(0, 1, len(label_categories)))       ## distinct color per class, since class count is no longer fixed at 2
+ax = plt.gca()
+train_handles = []
+holdout_handles = []
 for class_idx, class_name in enumerate(label_categories):
-  plt.scatter(Z_train[y_train_patient==class_idx,0], Z_train[y_train_patient==class_idx,1],
-              label=f"train: {class_name}", alpha=.3, c=[colors[class_idx]])
-  plt.scatter(Z_holdout[y_patient==class_idx,0], Z_holdout[y_patient==class_idx,1],
-              label=f"holdout: {class_name}", marker="x", s=100, c=[colors[class_idx]])
-plt.legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+  train_handle = ax.scatter(Z_train[y_train_patient==class_idx,0], Z_train[y_train_patient==class_idx,1],
+                             label=class_name, alpha=.6, c=[colors[class_idx]])
+  holdout_handle = ax.scatter(Z_holdout[y_patient==class_idx,0], Z_holdout[y_patient==class_idx,1],
+                               label=class_name, marker="x", s=80, alpha=1, c=[colors[class_idx]])
+  train_handles.append(train_handle)
+  holdout_handles.append(holdout_handle)
+
+train_legend = ax.legend(train_handles, label_categories, title="train",
+                          loc='upper left', bbox_to_anchor=(1.0, 1.0), fontsize=8)
+ax.add_artist(train_legend)
+ax.legend(holdout_handles, label_categories, title="holdout",
+          loc='lower left', bbox_to_anchor=(1.0, 0.0), fontsize=8)
 var_pct = pca.explained_variance_ratio_ * 100
 plt.xlabel(f"PC1 ({var_pct[0]:.0f}%)")
 plt.ylabel(f"PC2 ({var_pct[1]:.0f}%)")
@@ -180,3 +190,27 @@ PCA_PLOT_PATH = os.path.join(SAVE_DIR, 'holdout_pca_plot.png')
 plt.savefig(PCA_PLOT_PATH, bbox_inches='tight')
 print("saved holdout PCA plot to", PCA_PLOT_PATH)
 plt.show()
+
+from sklearn.metrics import roc_curve, auc
+from sklearn.preprocessing import label_binarize
+
+scores = pipe.predict_proba(X_patient)
+y_bin = label_binarize(y_patient, classes=range(len(label_categories)))
+
+plt.figure()
+for class_idx, class_name in enumerate(label_categories):
+  fpr, tpr, _ = roc_curve(y_bin[:, class_idx], scores[:, class_idx])
+  class_auc = auc(fpr, tpr)
+  plt.plot(fpr, tpr, color=colors[class_idx], linewidth=2,
+           label=f"{class_name} (AUC={class_auc:.3f})")
+plt.plot([0, 1], [0, 1], "--", color="gray", label="chance")
+plt.xlabel("False Positive Rate")
+plt.ylabel("True Positive Rate")
+plt.title("ROC curves (holdout)")
+plt.legend(fontsize=8)
+ROC_PLOT_PATH = os.path.join(SAVE_DIR, 'holdout_roc_curve_plot.png')
+plt.savefig(ROC_PLOT_PATH, bbox_inches="tight")
+print("saved holdout ROC curve plot to", ROC_PLOT_PATH)
+plt.show()
+
+

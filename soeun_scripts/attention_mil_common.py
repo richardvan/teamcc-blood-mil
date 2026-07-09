@@ -91,6 +91,16 @@ class AttentionMILWrapper:
         }
 
     @torch.no_grad()
+    def predict_bag_proba(self, bag_instances) -> np.ndarray:
+        """클래스별 확률 전체 반환 (n_classes,) — AUC 계산용."""
+        x = bag_instances.to(self.device)
+        if x.dtype != torch.float32:
+            x = x.float()
+        logits, _ = self.model(x)
+        probs = torch.softmax(logits, dim=1)[0]
+        return probs.cpu().numpy()
+
+    @torch.no_grad()
     def get_bag_vector(self, bag_instances) -> np.ndarray:
         """
         attention-pooled bag 벡터 z (분류기 직전의 hidden 표현).
@@ -110,18 +120,72 @@ class AttentionMILWrapper:
 
 def evaluate(model, bags, device):
     model.eval()
-    y_true, y_pred = [], []
+    y_true, y_pred, y_proba = [], [], []
     with torch.no_grad():
         for bag in bags:
             x = bag.instances.to(device).float()
             logits, _ = model(x)
-            pred = int(logits.argmax(dim=1).item())
+            probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
+            pred = int(np.argmax(probs))
             y_true.append(bag.true_label)
             y_pred.append(pred)
-    y_true, y_pred = np.array(y_true), np.array(y_pred)
+            y_proba.append(probs)
+    y_true, y_pred, y_proba = np.array(y_true), np.array(y_pred), np.array(y_proba)
     acc = accuracy_score(y_true, y_pred)
     f1m = f1_score(y_true, y_pred, average="macro", zero_division=0)
-    return acc, f1m, y_true, y_pred
+    return acc, f1m, y_true, y_pred, y_proba
+
+
+def compute_auc_macro(y_true, y_proba, n_classes):
+    """One-vs-rest macro AUC. 표본에 없는 클래스가 있으면 계산 불가하므로 NaN 처리."""
+    from sklearn.metrics import roc_auc_score
+    present = set(y_true.tolist())
+    if len(present) < 2:
+        return float("nan")
+    try:
+        return float(roc_auc_score(
+            y_true, y_proba, multi_class="ovr", average="macro",
+            labels=list(range(n_classes)),
+        ))
+    except ValueError:
+        return float("nan")
+
+
+def compute_auc_per_class(y_true, y_proba, n_classes):
+    """클래스별 one-vs-rest AUC. 해당 클래스가 표본에 아예 없거나 전부인 경우 NaN."""
+    from sklearn.metrics import roc_auc_score
+    from sklearn.preprocessing import label_binarize
+    y_bin = label_binarize(y_true, classes=list(range(n_classes)))
+    aucs = {}
+    for c in range(n_classes):
+        col_sum = y_bin[:, c].sum()
+        if col_sum == 0 or col_sum == len(y_bin):
+            aucs[c] = float("nan")
+        else:
+            aucs[c] = float(roc_auc_score(y_bin[:, c], y_proba[:, c]))
+    return aucs
+
+
+def compute_roc_curve_points(y_true, y_proba, n_classes, class_names):
+    """
+    클래스별 one-vs-rest ROC curve 좌표(FPR, TPR, threshold) 계산.
+    ROC curve를 실제로 '그리려면' AUC 숫자 하나가 아니라 이 좌표들이 필요합니다.
+    반환: pandas DataFrame (class_name, fpr, tpr, threshold 컬럼)
+    """
+    from sklearn.metrics import roc_curve
+    from sklearn.preprocessing import label_binarize
+    import pandas as pd
+
+    y_bin = label_binarize(y_true, classes=list(range(n_classes)))
+    rows = []
+    for c in range(n_classes):
+        col_sum = y_bin[:, c].sum()
+        if col_sum == 0 or col_sum == len(y_bin):
+            continue   # 이 클래스는 양성/음성이 한쪽만 있어서 곡선을 못 그림
+        fpr, tpr, thr = roc_curve(y_bin[:, c], y_proba[:, c])
+        for f, t, th in zip(fpr, tpr, thr):
+            rows.append({"class": class_names[c], "fpr": f, "tpr": t, "threshold": th})
+    return pd.DataFrame(rows)
 
 
 def train_model(model, train_bags, val_bags, device, epochs, lr, weight_decay,
@@ -150,7 +214,7 @@ def train_model(model, train_bags, val_bags, device, epochs, lr, weight_decay,
             optimizer.step()
             total_loss += loss.item()
 
-        val_acc, val_f1, _, _ = evaluate(model, val_bags, device)
+        val_acc, val_f1, _, _, _ = evaluate(model, val_bags, device)
         avg_loss = total_loss / len(train_bags)
 
         if val_f1 > best_val_f1:

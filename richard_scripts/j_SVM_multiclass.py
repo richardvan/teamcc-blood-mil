@@ -156,7 +156,7 @@ for fold_name in sorted(os.listdir(CV_SPLITS_DIR)):                   ## NEW COD
 
 pipe = Pipeline([
     ("scaler", StandardScaler()),
-    ("svm", SVC(class_weight="balanced")),                             ## NEW CODE (SVC uses one-vs-one for multiclass by default)
+    ("svm", SVC(class_weight="balanced", probability=True)),           ## NEW CODE (SVC uses one-vs-one for multiclass by default; probability=True enables predict_proba for AUROC)
 ])
 
 param_grid = {
@@ -245,9 +245,10 @@ from sklearn.decomposition import PCA
 X_patient_scaled = StandardScaler().fit_transform(X_patient)
 pca = PCA(n_components=2).fit(X_patient_scaled)
 Z_pca = pca.transform(X_patient_scaled)
+colors = plt.cm.tab10(np.linspace(0, 1, len(label_categories)))         ## NEW CODE (shared with the ROC plot below so each subtype's color matches across plots)
 for class_idx, class_name in enumerate(label_categories):              ## NEW CODE (loop over all classes instead of hardcoded control/AML)
-  plt.scatter(Z_pca[y_patient==class_idx,0], Z_pca[y_patient==class_idx,1], label=class_name, alpha=.6)  ## NEW CODE
-plt.legend(loc='center left', bbox_to_anchor=(1.0, 0.5))
+  plt.scatter(Z_pca[y_patient==class_idx,0], Z_pca[y_patient==class_idx,1], label=class_name, alpha=.6, c=[colors[class_idx]])  ## NEW CODE
+plt.legend(loc='center left', bbox_to_anchor=(1.0, 0.5), title="train")  ## NEW CODE (titled to match the holdout eval script's train/holdout split legend)
 var_pct = pca.explained_variance_ratio_ * 100
 plt.xlabel(f"PC1 ({var_pct[0]:.0f}%)")
 plt.ylabel(f"PC2 ({var_pct[1]:.0f}%)")
@@ -255,4 +256,69 @@ plt.title("Patient embeddings (PCA)")
 PCA_PLOT_PATH = os.path.join(SAVE_DIR, 'pca_plot.png')                    ## NEW CODE
 plt.savefig(PCA_PLOT_PATH, bbox_inches='tight')                            ## NEW CODE
 print("saved PCA plot to", PCA_PLOT_PATH)                                  ## NEW CODE
+plt.show()
+
+from sklearn.metrics import roc_curve, auc                                ## NEW CODE
+from sklearn.preprocessing import label_binarize                          ## NEW CODE
+
+y_bin_all = label_binarize(y_train, classes=range(len(label_categories)))  ## NEW CODE
+
+fold_results = []                                                         ## NEW CODE (one fit per fold, reused across all classes)
+for train_idx, test_idx in custom_cv:                                     ## NEW CODE
+  fold_model = clone(pipe).set_params(**grid.best_params_)                ## NEW CODE
+  fold_model.fit(X_train[train_idx], y_train[train_idx])                  ## NEW CODE
+  fold_proba = fold_model.predict_proba(X_train[test_idx])                ## NEW CODE
+  fold_results.append((test_idx, fold_proba))                             ## NEW CODE
+
+mean_fpr = np.linspace(0, 1, 100)                                         ## NEW CODE (reuses `colors` defined above in the PCA plot section, so subtype colors match across plots)
+
+class_mean_tpr = {}                                                       ## NEW CODE (per-class mean curve, reused by both the summary panel and each class's own panel)
+class_mean_auc = {}                                                       ## NEW CODE
+class_std_auc = {}                                                        ## NEW CODE
+
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))                          ## NEW CODE (6 panels: 1 summary + 5 subtypes, normal.control lands bottom-right since label_categories is sorted alphabetically last)
+summary_ax = axes.flat[0]                                                 ## NEW CODE
+class_axes = axes.flat[1:]                                                ## NEW CODE
+
+for class_idx, class_name in enumerate(label_categories):                 ## NEW CODE
+  ax = class_axes[class_idx]                                             ## NEW CODE
+  tprs = []                                                               ## NEW CODE
+  aucs = []                                                               ## NEW CODE
+  for test_idx, fold_proba in fold_results:                               ## NEW CODE
+    fold_fpr, fold_tpr, _ = roc_curve(y_bin_all[test_idx, class_idx], fold_proba[:, class_idx])  ## NEW CODE
+    ax.plot(fold_fpr, fold_tpr, color=colors[class_idx], alpha=0.25, linewidth=1)  ## NEW CODE (faint per-fold curve, per-class panel only)
+    interp_tpr = np.interp(mean_fpr, fold_fpr, fold_tpr)                  ## NEW CODE
+    interp_tpr[0] = 0.0                                                  ## NEW CODE
+    tprs.append(interp_tpr)                                              ## NEW CODE
+    aucs.append(auc(fold_fpr, fold_tpr))                                 ## NEW CODE
+  mean_tpr = np.mean(tprs, axis=0)                                        ## NEW CODE
+  mean_tpr[-1] = 1.0                                                     ## NEW CODE
+  mean_auc = auc(mean_fpr, mean_tpr)                                     ## NEW CODE
+  std_auc = np.std(aucs)                                                 ## NEW CODE
+  class_mean_tpr[class_name] = mean_tpr                                  ## NEW CODE
+  class_mean_auc[class_name] = mean_auc                                  ## NEW CODE
+  class_std_auc[class_name] = std_auc                                    ## NEW CODE
+
+  ax.plot(mean_fpr, mean_tpr, color=colors[class_idx], linewidth=2,       ## NEW CODE (bold mean curve)
+          label=f"mean (AUC={mean_auc:.3f} ± {std_auc:.3f})")           ## NEW CODE
+  ax.plot([0, 1], [0, 1], "--", color="gray")                            ## NEW CODE
+  ax.set_xlabel("False Positive Rate")                                  ## NEW CODE
+  ax.set_ylabel("True Positive Rate")                                   ## NEW CODE
+  ax.set_title(class_name)                                              ## NEW CODE
+  ax.legend(fontsize=8)                                                 ## NEW CODE
+
+for class_idx, class_name in enumerate(label_categories):                ## NEW CODE (summary panel: mean curve per class, no per-fold lines)
+  summary_ax.plot(mean_fpr, class_mean_tpr[class_name], color=colors[class_idx], linewidth=2,  ## NEW CODE
+                   label=f"{class_name} (AUC={class_mean_auc[class_name]:.3f} ± {class_std_auc[class_name]:.3f})")  ## NEW CODE
+summary_ax.plot([0, 1], [0, 1], "--", color="gray", label="chance")      ## NEW CODE
+summary_ax.set_xlabel("False Positive Rate")                            ## NEW CODE
+summary_ax.set_ylabel("True Positive Rate")                             ## NEW CODE
+summary_ax.set_title("All subtypes (mean ROC)")                         ## NEW CODE
+summary_ax.legend(fontsize=7)                                            ## NEW CODE
+
+fig.suptitle("ROC curves (CV, per-fold + mean per subtype)")            ## NEW CODE
+fig.tight_layout()                                                       ## NEW CODE
+ROC_PLOT_PATH = os.path.join(SAVE_DIR, 'roc_curve_plot.png')             ## NEW CODE
+fig.savefig(ROC_PLOT_PATH, bbox_inches="tight")                          ## NEW CODE
+print("saved ROC curve plot to", ROC_PLOT_PATH)                          ## NEW CODE
 plt.show()
