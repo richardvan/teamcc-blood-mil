@@ -3,26 +3,33 @@ import torch
 import numpy as np
 import glob, os
 import pandas as pd
+import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader
 from torchvision import transforms, models
 from PIL import Image
-import joblib
 from sklearn.metrics import balanced_accuracy_score, f1_score, confusion_matrix, classification_report
 
 DATA_DIR = '/home/sp00001/blood_mil_project/organized_data'
-SAVE_DIR = '/home/sp00001/blood_mil_project/richard_scripts/SVM_binary/'
-METADATA_PATH = '/home/sp00001/blood_mil_project/metadata_for_binary.csv'
-HOLDOUT_PATH = '/home/sp00001/blood_mil_project/holdout_data/holdout_patients.txt'
-MODEL_PATH = os.path.join(SAVE_DIR, 'svm_best_model.joblib')
+SAVE_DIR = '/home/sp00001/blood_mil_project/richard_scripts/lowercase_mi_SVM_multiclass/'
+METADATA_PATH = '/home/sp00001/blood_mil_project/metadata_for_multiclass.csv'
+HOLDOUT_PATH = '/home/sp00001/blood_mil_project/holdout_data_for_multiclass/holdout_patients.txt'
+MODEL_PATH = os.path.join(SAVE_DIR, 'models', 'mil_svm_mi.pt')                ## ** lowercase mi-SVM specific
 
-# holdout_data/holdout_patients.txt lists the folder_name values that j_SVM_binary.py
-# excluded from training/CV (via holdout_patients + fold_covered_patients filters) so
-# this set stays truly unseen. This script is the first place that set gets loaded/evaluated.
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+# holdout_data_for_multiclass/holdout_patients.txt lists the folder values that
+# j_lowercase_miSVM_multiclass.py excluded from training/CV (via holdout_patients + fold_covered_patients
+# filters) so this set stays truly unseen. This script is the first place that set gets
+# loaded/evaluated for the mi-SVM model.
 
 meta_df = pd.read_csv(METADATA_PATH)
 
 with open(HOLDOUT_PATH) as f:
   holdout_patients = set(line.strip() for line in f if line.strip())
+
+label_categories = sorted(meta_df['status'].unique())                  ## label encoding must match j_uppercase_MISVM_multiclass.py, computed from the full metadata
+label_to_int = {label: i for i, label in enumerate(label_categories)}
 
 meta_df = meta_df[meta_df['folder'].isin(holdout_patients)]
 print(len(meta_df), "holdout patients found in metadata")
@@ -41,8 +48,6 @@ else:
   for folder_name in meta_df['folder']:
     image_paths.extend(glob.glob(os.path.join(DATA_DIR, folder_name, '*.tif')))
   print(len(image_paths))
-
-  device = "cuda" if torch.cuda.is_available() else "cpu"
 
   patient_ids = [os.path.basename(os.path.dirname(p)) for p in image_paths]
 
@@ -93,55 +98,87 @@ else:
   print("feature extraction took", feature_extraction_end - feature_extraction_start, "seconds")
 
 df = meta_df.copy()
-df['label'] = df['status'].astype(int)
+df['label'] = df['status'].map(label_to_int)
 patient_label = dict(zip(df['folder'], df['label']))
-label_categories = ["normal", "cancer"]                                 ## NEW CODE (label 0/1 names, mirrors label_categories in the multiclass script)
 
 patients = np.unique(groups)
 
-X_patient = []
-y_patient = []
+def load_bags_from_groups(id_list):
+  bags = []
+  for pid in id_list:
+    mask = groups == pid
+    feat = torch.tensor(X[mask], dtype=torch.float32)
+    bags.append((feat, patient_label[pid], pid))
+  return bags
 
-for pid in patients:
-  mask = groups == pid
-  avg_vector = X[mask].mean(axis=0)
-  X_patient.append(avg_vector)
-  y_patient.append(patient_label[pid])
+holdout_bags = load_bags_from_groups(patients)
 
-X_patient = np.array(X_patient)
-y_patient = np.array(y_patient)
+#모델 로드
 
-pipe = joblib.load(MODEL_PATH)
+class MIL_SVM(nn.Module):
+  def __init__(self, in_dim, n_classes, mode='MI'):
+    super().__init__()
+    self.mode = mode
+    self.classifier = nn.Linear(in_dim, n_classes)
+
+  def forward(self, bag):
+    if self.mode == 'MI':
+      z = bag.mean(dim=0, keepdim=True)
+      scores = self.classifier(z)
+      return scores, None
+    else:
+      inst = self.classifier(bag)                                          ## ** lowercase mi-SVM specific
+      scores, _ = inst.max(dim=0, keepdim=True)                             ## ** lowercase mi-SVM specific
+      return scores, inst                                                  ## ** lowercase mi-SVM specific
+
+ckpt = torch.load(MODEL_PATH, map_location=device)
+net = MIL_SVM(ckpt['in_dim'], ckpt['n_classes'], mode=ckpt['mode']).to(device)
+net.load_state_dict(ckpt['state_dict'])
+net.eval()
 print("loaded model from", MODEL_PATH)
 
-pred = pipe.predict(X_patient)
+@torch.no_grad()
+def collect_predictions(model, bags):
+  y_true, y_pred, y_prob = [], [], []
+  for feat, y, _ in bags:
+    feat = feat.to(device)
+    feat = (feat - ckpt['feat_mean'].to(device)) / ckpt['feat_std'].to(device)
+    scores, _ = model(feat)
+    prob = F.softmax(scores, dim=1)[0]
+    y_true.append(y)
+    y_pred.append(int(scores.argmax(dim=1)))
+    y_prob.append(prob.cpu().numpy())
+  return np.array(y_true), np.array(y_pred), np.array(y_prob)
 
-print("holdout balanced accuracy:", balanced_accuracy_score(y_patient, pred))
-print("holdout F1 score:", f1_score(y_patient, pred, average="macro"))
-print(classification_report(y_patient, pred))
-print(confusion_matrix(y_patient, pred))
+y_true, y_pred, y_prob = collect_predictions(net, holdout_bags)
+
+print("holdout balanced accuracy:", balanced_accuracy_score(y_true, y_pred))
+print("holdout F1 score:", f1_score(y_true, y_pred, average="macro"))
+print(classification_report(y_true, y_pred, target_names=label_categories))
+print(confusion_matrix(y_true, y_pred))
 
 REPORT_PATH = os.path.join(SAVE_DIR, 'holdout_classification_report.txt')
 with open(REPORT_PATH, 'w') as f:
-  f.write(classification_report(y_patient, pred))
+  f.write(classification_report(y_true, y_pred, target_names=label_categories))
 print("saved holdout classification report to", REPORT_PATH)
 
 CONF_MATRIX_PATH = os.path.join(SAVE_DIR, 'holdout_confusion_matrix.txt')
-np.savetxt(CONF_MATRIX_PATH, confusion_matrix(y_patient, pred), fmt='%d')
+np.savetxt(CONF_MATRIX_PATH, confusion_matrix(y_true, y_pred), fmt='%d')
 print("saved holdout confusion matrix to", CONF_MATRIX_PATH)
 
+#PCA 시각화
+
 import matplotlib.pyplot as plt
-import matplotlib.colors                                                  ## NEW CODE
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
 # Fit the PCA/scaler on the training patients (same population the model was trained
 # on) so the holdout points land on the same axes as the training PCA plot, rather
-# than fitting a fresh (noisier) PCA on just the 28 holdout points.
+# than fitting a fresh (noisier) PCA on just the holdout points.
 TRAIN_X_PATH = os.path.join(SAVE_DIR, 'X.npy')
 TRAIN_GROUPS_PATH = os.path.join(SAVE_DIR, 'groups.npy')
 full_meta_df = pd.read_csv(METADATA_PATH)
-full_meta_df['label'] = full_meta_df['status'].astype(int)
+full_meta_df['label'] = full_meta_df['status'].map(label_to_int)
 full_patient_label = dict(zip(full_meta_df['folder'], full_meta_df['label']))
 
 X_train_all = np.load(TRAIN_X_PATH)
@@ -157,23 +194,23 @@ for pid in train_patients:
 X_train_patient = np.array(X_train_patient)
 y_train_patient = np.array(y_train_patient)
 
+X_holdout_patient = np.array([X[groups == pid].mean(axis=0) for pid in patients])
+y_holdout_patient = np.array([patient_label[pid] for pid in patients])
+
 scaler = StandardScaler().fit(X_train_patient)
 pca = PCA(n_components=2).fit(scaler.transform(X_train_patient))
 
 Z_train = pca.transform(scaler.transform(X_train_patient))
-Z_holdout = pca.transform(scaler.transform(X_patient))
+Z_holdout = pca.transform(scaler.transform(X_holdout_patient))
 
-colors = np.array([                                                    ## distinct color per class, shared with the ROC plot below
-    plt.cm.tab10(np.linspace(0, 1, 5))[4],                             ## normal: same color as "normal.control" in the multiclass script
-    matplotlib.colors.to_rgba("tab:orange"),                           ## cancer: distinct from normal
-])
+colors = plt.cm.tab10(np.linspace(0, 1, len(label_categories)))
 ax = plt.gca()
 train_handles = []
 holdout_handles = []
 for class_idx, class_name in enumerate(label_categories):
   train_handle = ax.scatter(Z_train[y_train_patient==class_idx,0], Z_train[y_train_patient==class_idx,1],
                              label=class_name, alpha=.6, c=[colors[class_idx]])
-  holdout_handle = ax.scatter(Z_holdout[y_patient==class_idx,0], Z_holdout[y_patient==class_idx,1],
+  holdout_handle = ax.scatter(Z_holdout[y_holdout_patient==class_idx,0], Z_holdout[y_holdout_patient==class_idx,1],
                                label=class_name, marker="x", s=80, alpha=1, c=[colors[class_idx]])
   train_handles.append(train_handle)
   holdout_handles.append(holdout_handle)
@@ -183,10 +220,10 @@ train_legend = ax.legend(train_handles, label_categories, title="train",
 ax.add_artist(train_legend)
 ax.legend(holdout_handles, label_categories, title="holdout",
           loc='lower left', bbox_to_anchor=(1.0, 0.0), fontsize=8)
-plt.title("Holdout patient embeddings (PCA, fit on training set)")
 var_pct = pca.explained_variance_ratio_ * 100
 plt.xlabel(f"PC1 ({var_pct[0]:.0f}%)")
 plt.ylabel(f"PC2 ({var_pct[1]:.0f}%)")
+plt.title("Holdout patient embeddings (PCA, fit on training set)")
 PCA_PLOT_PATH = os.path.join(SAVE_DIR, 'holdout_pca_plot.png')
 plt.savefig(PCA_PLOT_PATH, bbox_inches='tight')
 print("saved holdout PCA plot to", PCA_PLOT_PATH)
@@ -195,14 +232,11 @@ plt.show()
 from sklearn.metrics import roc_curve, auc
 from sklearn.preprocessing import label_binarize
 
-scores = pipe.predict_proba(X_patient)
-y_bin = label_binarize(y_patient, classes=range(len(label_categories)))
-if len(label_categories) == 2:                                       ## label_binarize collapses binary labels to a single column
-  y_bin = np.hstack([1 - y_bin, y_bin])
+y_bin = label_binarize(y_true, classes=range(len(label_categories)))
 
 plt.figure()
 for class_idx, class_name in enumerate(label_categories):
-  fpr, tpr, _ = roc_curve(y_bin[:, class_idx], scores[:, class_idx])
+  fpr, tpr, _ = roc_curve(y_bin[:, class_idx], y_prob[:, class_idx])
   class_auc = auc(fpr, tpr)
   plt.plot(fpr, tpr, color=colors[class_idx], linewidth=2,
            label=f"{class_name} (AUC={class_auc:.3f})")
@@ -216,8 +250,10 @@ plt.savefig(ROC_PLOT_PATH, bbox_inches="tight")
 print("saved holdout ROC curve plot to", ROC_PLOT_PATH)
 plt.show()
 
+#혼동행렬 히트맵
+
 N_CLASSES = len(label_categories)
-cm = confusion_matrix(y_patient, pred, labels=range(N_CLASSES))
+cm = confusion_matrix(y_true, y_pred, labels=range(N_CLASSES))
 cm_norm = cm.astype(float) / cm.sum(axis=1, keepdims=True).clip(min=1)
 
 fig, ax = plt.subplots(figsize=(7, 6))
@@ -238,4 +274,40 @@ plt.tight_layout()
 CM_PLOT_PATH = os.path.join(SAVE_DIR, 'holdout_confusion_matrix_heatmap.png')
 plt.savefig(CM_PLOT_PATH, bbox_inches='tight')
 print("saved holdout confusion matrix heatmap to", CM_PLOT_PATH)
+plt.show()
+
+#클래스별 정확도, 확신도
+
+fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+
+per_class_acc = []
+for c in range(N_CLASSES):
+    mask = (y_true == c)
+    acc = (y_pred[mask] == c).mean() if mask.sum() > 0 else 0.0
+    per_class_acc.append(acc)
+
+bars = axes[0].bar(range(N_CLASSES), per_class_acc, color='steelblue')
+axes[0].set_xticks(range(N_CLASSES))
+axes[0].set_xticklabels(label_categories, rotation=45, ha='right')
+axes[0].set_ylim(0, 1); axes[0].set_ylabel('accuracy')
+axes[0].set_title('Per-class accuracy (Holdout)')
+for b, a in zip(bars, per_class_acc):
+    axes[0].text(b.get_x()+b.get_width()/2, a+0.02, f'{a:.2f}', ha='center')
+axes[0].axhline(y=np.mean(per_class_acc), color='red', linestyle='--',
+                label=f'mean={np.mean(per_class_acc):.2f}')
+axes[0].legend()
+
+conf = y_prob.max(axis=1)
+correct = (y_true == y_pred)
+axes[1].hist([conf[correct], conf[~correct]], bins=10, range=(0,1),
+             label=['correct', 'wrong'], color=['green','salmon'], stacked=True)
+axes[1].set_xlabel('prediction confidence (max prob)')
+axes[1].set_ylabel('num patients')
+axes[1].set_title('Confidence: correct vs wrong (Holdout)')
+axes[1].legend()
+
+plt.tight_layout()
+DIAGNOSTICS_PLOT_PATH = os.path.join(SAVE_DIR, 'holdout_per_class_accuracy_and_confidence.png')
+plt.savefig(DIAGNOSTICS_PLOT_PATH, bbox_inches='tight')
+print("saved holdout per-class accuracy/confidence plot to", DIAGNOSTICS_PLOT_PATH)
 plt.show()

@@ -32,7 +32,7 @@ import numpy as np                                                         ## NE
 import pandas as pd                                                        ## NEW CODE
 
 DATA_DIR = '/home/sp00001/blood_mil_project/organized_data'                ## NEW CODE
-SAVE_DIR = '/home/sp00001/blood_mil_project/richard_scripts/MIL_SVM_multiclass/'  ## NEW CODE
+SAVE_DIR = '/home/sp00001/blood_mil_project/richard_scripts/lowercase_mi_SVM_multiclass/'  ## NEW CODE
 METADATA_PATH = '/home/sp00001/blood_mil_project/metadata_for_multiclass.csv'      ## NEW CODE
 
 meta_df = pd.read_csv(METADATA_PATH)                                       ## NEW CODE
@@ -51,7 +51,7 @@ CLASS_TO_IDX = {c: i for i, c in enumerate(CLASSES)}                         ## 
 N_CLASSES = len(CLASSES)                                                     ## NEW CODE
 
 # FOLD = 1                                                                    ## OLD CODE
-MODE = 'MI'
+MODE = 'mi'                                                                 ## ** lowercase mi-SVM specific
 
 LR = 0.0001
 WEIGHT_DECAY = 1e-2
@@ -271,9 +271,9 @@ class MIL_SVM(nn.Module):
       scores = self.classifier(z)
       return scores, None
     else:
-      inst = self.classifier(bag)
-      scores, _ = inst.max(dim=0, keepdim=True)
-      return scores, inst
+      inst = self.classifier(bag)                                          ## ** lowercase mi-SVM specific
+      scores, _ = inst.max(dim=0, keepdim=True)                             ## ** lowercase mi-SVM specific
+      return scores, inst                                                  ## ** lowercase mi-SVM specific
 
 
 #학습 루프
@@ -409,6 +409,21 @@ for fold, (tr_ids, va_ids) in enumerate(custom_cv, start=1):                ## N
 
 print('------------------------------------------------------')
 print(f'avg best val acc = {sum(fold_val_acc.values()) / len(fold_val_acc):.4f}')  ## NEW CODE (was hardcoded /5)
+
+#전체 학습 데이터로 최종 모델 학습 (best params, holdout을 val로 사용)          ## NEW CODE
+
+holdout_ids_final = [p for p in np.unique(groups) if p in holdout_patients]  ## NEW CODE
+
+final_train_bags = load_bags_from_groups(patients)                          ## NEW CODE
+final_val_bags = load_bags_from_groups(holdout_ids_final)                   ## NEW CODE
+
+final_inst = torch.cat([b for b, _, _ in final_train_bags], dim=0)          ## NEW CODE
+final_m, final_s = final_inst.mean(dim=0), final_inst.std(dim=0) + 1e-6     ## NEW CODE
+final_train_bags = [((b-final_m) / final_s, y, pid) for b, y, pid in final_train_bags]  ## NEW CODE
+final_val_bags = [((b-final_m) / final_s, y, pid) for b, y, pid in final_val_bags]        ## NEW CODE
+
+final_model, final_history = train_model(MODE, final_train_bags, final_val_bags)          ## NEW CODE
+print(f'[final model] best val acc = {max(final_history["val_acc"]):.4f}')               ## NEW CODE
 
 
 
@@ -596,6 +611,36 @@ for fold in fold_histories:                                                 ## N
   print("saved validation accuracy per fold plot to", VAL_ACC_OVERLAY_PATH)
   plt.show()
 
+#최종 모델(전체 학습 데이터, holdout=val) learning curve                     ## NEW CODE
+
+FINAL_LEARNING_CURVE_PATH = os.path.join(SAVE_DIR, 'learning_curve_final_model.png')  ## NEW CODE
+plot_learning_curves(final_history, title='final model (full train data, val=holdout)', save_path=FINAL_LEARNING_CURVE_PATH)  ## NEW CODE
+
+#5-fold 학습(train) loss curve 통합 (fold별 색상 + 평균선), 1패널            ## NEW CODE
+
+fold_ids = sorted(fold_histories.keys())                                    ## NEW CODE
+fold_colors = plt.cm.tab10(np.linspace(0, 1, len(fold_ids)))                ## NEW CODE
+AVG_COLOR = 'black'                                                         ## NEW CODE
+
+fig, ax = plt.subplots(figsize=(7, 5))                                     ## NEW CODE
+epochs = range(1, EPOCHS + 1)                                              ## NEW CODE
+fold_curves = []                                                           ## NEW CODE
+for fold, color in zip(fold_ids, fold_colors):                             ## NEW CODE
+  curve = fold_histories[fold]['train_loss']                              ## NEW CODE
+  fold_curves.append(curve)                                                ## NEW CODE
+  ax.plot(epochs, curve, color=color, label=f'fold {fold}', alpha=0.85)    ## NEW CODE
+avg_curve = np.mean(fold_curves, axis=0)                                   ## NEW CODE
+ax.plot(epochs, avg_curve, color=AVG_COLOR, linewidth=2.5, linestyle='--', label='avg')  ## NEW CODE
+ax.set_title('Train Loss'); ax.set_xlabel('Epochs'); ax.set_ylabel('Train Loss')  ## NEW CODE
+ax.legend(fontsize=8); ax.grid(True)                                       ## NEW CODE
+
+fig.suptitle('Training loss curve across 5 folds (+ average)')            ## NEW CODE
+fig.tight_layout()                                                         ## NEW CODE
+FOLD_LEARNING_CURVES_PATH = os.path.join(SAVE_DIR, 'learning_curves_all_folds.png')  ## NEW CODE
+fig.savefig(FOLD_LEARNING_CURVES_PATH, bbox_inches='tight')                ## NEW CODE
+print("saved 5-fold training learning curves (+ avg) to", FOLD_LEARNING_CURVES_PATH)  ## NEW CODE
+plt.show()                                                                  ## NEW CODE
+
 #모델 저장
 
 MODEL_DIR = os.path.join(SAVE_DIR, 'models')
@@ -617,6 +662,91 @@ torch.save({
     'feat_std': feat_std_1,                                                  ## NEW CODE
 }, MODEL_PATH)
 print('저장 완료:', MODEL_PATH)
+
+#PCA 시각화, AUROC                                                          ## NEW CODE (mirrors the PCA/ROC plots added to j_SVM_multiclass.py; the MIL_SVM head already outputs softmax probabilities, so no probability=True flag is needed here)
+
+from sklearn.decomposition import PCA                                      ## NEW CODE
+from sklearn.preprocessing import StandardScaler, label_binarize           ## NEW CODE
+from sklearn.metrics import roc_curve, auc                                 ## NEW CODE
+
+X_patient = []                                                              ## NEW CODE
+y_patient = []                                                              ## NEW CODE
+for pid in patients:                                                       ## NEW CODE
+  mask = groups == pid                                                     ## NEW CODE
+  X_patient.append(X[mask].mean(axis=0))                                   ## NEW CODE
+  y_patient.append(patient_label[pid])                                     ## NEW CODE
+X_patient = np.array(X_patient)                                            ## NEW CODE
+y_patient = np.array(y_patient)                                            ## NEW CODE
+
+X_patient_scaled = StandardScaler().fit_transform(X_patient)               ## NEW CODE
+pca = PCA(n_components=2).fit(X_patient_scaled)                            ## NEW CODE
+Z_pca = pca.transform(X_patient_scaled)                                    ## NEW CODE
+colors = plt.cm.tab10(np.linspace(0, 1, len(CLASSES)))                     ## NEW CODE (shared with the ROC plot below so each subtype's color matches across plots)
+for class_idx, class_name in enumerate(CLASSES):                           ## NEW CODE
+  plt.scatter(Z_pca[y_patient==class_idx,0], Z_pca[y_patient==class_idx,1], label=class_name, alpha=.6, c=[colors[class_idx]])  ## NEW CODE
+plt.legend(loc='center left', bbox_to_anchor=(1.0, 0.5), title="train")    ## NEW CODE
+var_pct = pca.explained_variance_ratio_ * 100                              ## NEW CODE
+plt.xlabel(f"PC1 ({var_pct[0]:.0f}%)")                                     ## NEW CODE
+plt.ylabel(f"PC2 ({var_pct[1]:.0f}%)")                                     ## NEW CODE
+plt.title("Patient embeddings (PCA)")                                      ## NEW CODE
+PCA_PLOT_PATH = os.path.join(SAVE_DIR, 'pca_plot.png')                     ## NEW CODE
+plt.savefig(PCA_PLOT_PATH, bbox_inches='tight')                            ## NEW CODE
+print("saved PCA plot to", PCA_PLOT_PATH)                                  ## NEW CODE
+plt.show()                                                                  ## NEW CODE
+
+mean_fpr = np.linspace(0, 1, 100)                                          ## NEW CODE (reuses `colors` defined above so subtype colors match across plots)
+
+class_mean_tpr = {}                                                        ## NEW CODE (per-class mean curve, reused by both the summary panel and each class's own panel)
+class_mean_auc = {}                                                        ## NEW CODE
+class_std_auc = {}                                                         ## NEW CODE
+
+fig, axes = plt.subplots(2, 3, figsize=(15, 10))                           ## NEW CODE (6 panels: 1 summary + 5 subtypes, normal.control lands bottom-right since CLASSES is sorted alphabetically last)
+summary_ax = axes.flat[0]                                                   ## NEW CODE
+class_axes = axes.flat[1:]                                                  ## NEW CODE
+
+for class_idx, class_name in enumerate(CLASSES):                           ## NEW CODE
+  ax = class_axes[class_idx]                                              ## NEW CODE
+  tprs = []                                                                ## NEW CODE
+  aucs = []                                                                ## NEW CODE
+  for fold_true, fold_prob in zip(y_true_all, y_prob_all):                 ## NEW CODE (one out-of-fold ROC point set per CV fold, already collected above)
+    fold_bin = label_binarize(fold_true, classes=range(len(CLASSES)))      ## NEW CODE
+    fold_fpr, fold_tpr, _ = roc_curve(fold_bin[:, class_idx], fold_prob[:, class_idx])  ## NEW CODE
+    ax.plot(fold_fpr, fold_tpr, color=colors[class_idx], alpha=0.25, linewidth=1)  ## NEW CODE (faint per-fold curve, per-class panel only)
+    interp_tpr = np.interp(mean_fpr, fold_fpr, fold_tpr)                   ## NEW CODE
+    interp_tpr[0] = 0.0                                                   ## NEW CODE
+    tprs.append(interp_tpr)                                               ## NEW CODE
+    aucs.append(auc(fold_fpr, fold_tpr))                                  ## NEW CODE
+  mean_tpr = np.mean(tprs, axis=0)                                         ## NEW CODE
+  mean_tpr[-1] = 1.0                                                      ## NEW CODE
+  mean_auc = auc(mean_fpr, mean_tpr)                                      ## NEW CODE
+  std_auc = np.std(aucs)                                                  ## NEW CODE
+  class_mean_tpr[class_name] = mean_tpr                                   ## NEW CODE
+  class_mean_auc[class_name] = mean_auc                                   ## NEW CODE
+  class_std_auc[class_name] = std_auc                                     ## NEW CODE
+
+  ax.plot(mean_fpr, mean_tpr, color=colors[class_idx], linewidth=2,        ## NEW CODE (bold mean curve)
+          label=f"mean (AUC={mean_auc:.3f} ± {std_auc:.3f})")            ## NEW CODE
+  ax.plot([0, 1], [0, 1], "--", color="gray")                             ## NEW CODE
+  ax.set_xlabel("False Positive Rate")                                   ## NEW CODE
+  ax.set_ylabel("True Positive Rate")                                    ## NEW CODE
+  ax.set_title(class_name)                                               ## NEW CODE
+  ax.legend(fontsize=8)                                                  ## NEW CODE
+
+for class_idx, class_name in enumerate(CLASSES):                          ## NEW CODE (summary panel: mean curve per class, no per-fold lines)
+  summary_ax.plot(mean_fpr, class_mean_tpr[class_name], color=colors[class_idx], linewidth=2,  ## NEW CODE
+                   label=f"{class_name} (AUC={class_mean_auc[class_name]:.3f} ± {class_std_auc[class_name]:.3f})")  ## NEW CODE
+summary_ax.plot([0, 1], [0, 1], "--", color="gray", label="chance")       ## NEW CODE
+summary_ax.set_xlabel("False Positive Rate")                             ## NEW CODE
+summary_ax.set_ylabel("True Positive Rate")                              ## NEW CODE
+summary_ax.set_title("All subtypes (mean ROC)")                          ## NEW CODE
+summary_ax.legend(fontsize=7)                                             ## NEW CODE
+
+fig.suptitle("ROC curves (CV, per-fold + mean per subtype)")             ## NEW CODE
+fig.tight_layout()                                                        ## NEW CODE
+ROC_PLOT_PATH = os.path.join(SAVE_DIR, 'roc_curve_plot.png')              ## NEW CODE
+fig.savefig(ROC_PLOT_PATH, bbox_inches="tight")                           ## NEW CODE
+print("saved ROC curve plot to", ROC_PLOT_PATH)                           ## NEW CODE
+plt.show()                                                                 ## NEW CODE
 
 #새 데이터에 적용
 

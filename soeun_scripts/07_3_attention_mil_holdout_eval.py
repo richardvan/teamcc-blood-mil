@@ -38,6 +38,7 @@ from mil_common import (
     PROJECT_DIR, MODEL_ROOT, OUTPUT_DIR, CLASS_NAMES, N_CLASSES,
     log, build_bag_objects, get_instance_filenames,
     load_metadata, get_holdout_folders_from_metadata,
+    plot_multiclass_roc_grid,
 )
 from attention_mil_common import (
     AttentionMIL, AttentionMILWrapper, compute_auc_macro, compute_auc_per_class,
@@ -50,6 +51,9 @@ from shared_functions_V2 import predict_labels_and_report_performance
 def main():
     parser = argparse.ArgumentParser(description="Attention-MIL holdout 평가")
     parser.add_argument("--metadata_file", type=str, default="metadata_for_multiclass.csv")
+    parser.add_argument("--run_id", type=str, default="latest",
+                        help="어느 학습 실행 결과를 쓸지. 기본값 latest는 "
+                             "가장 최근 학습(07_2/07_6/06_2)이 갱신한 심볼릭 링크를 따라감.")
     parser.add_argument("--model_name", type=str, default="attention_mil_v1")
     parser.add_argument("--top_k", type=int, default=10,
                         help="attention 해석용 top-k 세포 저장 개수")
@@ -57,7 +61,12 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_gen = "gen3_attention"
-    save_dir = MODEL_ROOT / model_gen / "artifacts"
+    USER_TAG = "soeun"
+    USER_TAG_DIR = MODEL_ROOT / model_gen / USER_TAG
+    run_id = args.run_id
+
+    save_dir = USER_TAG_DIR / run_id / "artifacts"
+    save_dir.mkdir(parents=True, exist_ok=True)
 
     log("=" * 55)
     log("START: Attention-MIL holdout 평가")
@@ -65,7 +74,7 @@ def main():
     log("=" * 55)
 
     # ── 모델 로드 ────────────────────────────────────────────────
-    model_path = MODEL_ROOT / model_gen / f"{args.model_name}.pt"
+    model_path = USER_TAG_DIR / run_id / f"{args.model_name}.pt"
     log(f"[1] 모델 로드 중 → {model_path}")
     ckpt = torch.load(model_path, map_location=device)
     model = AttentionMIL(
@@ -100,31 +109,26 @@ def main():
     for c, name in enumerate(CLASS_NAMES):
         log(f"       AUC[{name:<16}]: {auc_per_class[c]:.3f}")
 
-    auc_path = save_dir / "holdout_auc_metrics.json"
+    auc_path = save_dir / "holdout_auc_metrics_attention.json"
+
+    roc_df = compute_roc_curve_points(y_true, y_proba, N_CLASSES, CLASS_NAMES)
+    roc_path = save_dir / "holdout_roc_curve_points_attention.csv"
+    roc_df.to_csv(roc_path, index=False)
+    log(f"  holdout ROC curve 원본 좌표 저장 → {roc_path}")
+
+    roc_plot_path = save_dir / "holdout_roc_curve_plot_attention.png"
+    grid_result = plot_multiclass_roc_grid(
+        [(y_true, y_proba)], CLASS_NAMES, N_CLASSES,
+        title="ROC curves — Attention-MIL (holdout)",
+        out_path=roc_plot_path,
+    )
     auc_path.write_text(json.dumps({
         "auc_macro": auc_macro,
         "auc_per_class": {CLASS_NAMES[c]: v for c, v in auc_per_class.items()},
+        "auc_per_class_grid": grid_result["mean_auc_per_class"],  # 위와 동일해야 함 (교차검산용)
     }, indent=2))
     log(f"  holdout AUC 결과 저장 → {auc_path}")
-
-    roc_df = compute_roc_curve_points(y_true, y_proba, N_CLASSES, CLASS_NAMES)
-    roc_path = save_dir / "holdout_roc_curve_points.csv"
-    roc_df.to_csv(roc_path, index=False)
-    log(f"  holdout ROC curve 좌표 저장 → {roc_path}")
-
-    plt.figure()
-    for cls_name, g in roc_df.groupby("class"):
-        auc_val = auc_per_class[CLASS_NAMES.index(cls_name)]
-        plt.plot(g["fpr"], g["tpr"], label=f"{cls_name} (AUC={auc_val:.3f})")
-    plt.plot([0, 1], [0, 1], "--", color="gray", label="chance")
-    plt.xlabel("False Positive Rate")
-    plt.ylabel("True Positive Rate")
-    plt.title(f"ROC curves (holdout, macro AUC={auc_macro:.3f})")
-    plt.legend(fontsize=8)
-    roc_plot_path = save_dir / "holdout_roc_curve_plot.png"
-    plt.savefig(roc_plot_path, bbox_inches="tight")
-    plt.close()
-    log(f"  holdout ROC curve plot 저장 → {roc_plot_path}")
+    log(f"  holdout ROC curve plot(2x3) 저장 → {roc_plot_path}")
 
     report = classification_report(
         y_true, y_pred, labels=list(range(N_CLASSES)),
@@ -134,12 +138,12 @@ def main():
     cm = confusion_matrix(y_true, y_pred, labels=list(range(N_CLASSES)))
     print(cm, flush=True)
 
-    report_path = save_dir / "holdout_classification_report.txt"
+    report_path = save_dir / "holdout_classification_report_attention.txt"
     with open(report_path, "w") as f:
         f.write(report)
     log(f"  holdout_classification_report 저장 → {report_path}")
 
-    cm_path = save_dir / "holdout_confusion_matrix.txt"
+    cm_path = save_dir / "holdout_confusion_matrix_attention.txt"
     np.savetxt(cm_path, cm, fmt="%d")
     log(f"  holdout_confusion_matrix 저장 → {cm_path}")
 
@@ -150,7 +154,7 @@ def main():
         holdout_bags = holdout_bags,
         model_gen    = model_gen,
         model_name   = args.model_name,
-        output_dir   = str(OUTPUT_DIR),
+        output_dir   = str(OUTPUT_DIR / USER_TAG / run_id),
     )
     log("[4] 완료")
     print(metrics_df.to_string(index=False), flush=True)
@@ -203,7 +207,7 @@ def main():
         "split": "holdout",
         "pc1": Z_holdout[:, 0], "pc2": Z_holdout[:, 1],
     })
-    pca_csv_path = save_dir / "holdout_pca_coords.csv"
+    pca_csv_path = save_dir / "holdout_pca_coords_attention.csv"
     pd.concat([train_df, holdout_df], ignore_index=True).to_csv(pca_csv_path, index=False)
     log(f"[6] PCA 좌표 저장 → {pca_csv_path}")
 
@@ -218,7 +222,7 @@ def main():
                     label=f"holdout: {class_name}", marker="x", s=100, c=[colors[class_idx]])
     plt.legend(fontsize=7)
     plt.title("Holdout patient bag embeddings (PCA, fit on training set)")
-    pca_plot_path = save_dir / "holdout_pca_plot.png"
+    pca_plot_path = save_dir / "holdout_pca_plot_attention.png"
     plt.savefig(pca_plot_path, bbox_inches="tight")
     plt.close()
     log(f"[6] PCA plot 저장 → {pca_plot_path}")

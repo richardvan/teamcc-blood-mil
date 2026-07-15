@@ -1,21 +1,13 @@
 #!/usr/bin/env python3
 """
-07_2_attention_mil_train.py — Attention-MIL 학습 (CV + 최종 모델)
+07_6_multi_attention_mil_train.py — Class-wise Attention MIL 학습 (SCEMILA 논문 방식)
 
-최종 모델 학습 방침 (팀원의 06b_train_final_and_eval_holdout.py 와 통일):
-  - CV(5-fold)는 "몇 epoch이 적당한지" 및 "이 구조/설정이 안정적인지"를 확인하는 단계입니다.
-  - 최종 모델은 CV에서 확인된 epoch 수(각 fold의 best epoch의 중앙값)를 고정값으로 써서,
-    val을 별도로 떼지 않고 non-holdout 환자 전체로 학습합니다.
-    (val 성능을 보고 또 한 번 "언제 멈출지"를 고르면 이중 판단이 되어 살짝 낙관적으로
-     새기 쉽다는 점을 반영 — 팀원 CNN 코드의 방침을 그대로 따름)
-  - holdout은 이 최종 모델로 마지막에 딱 한 번만 평가합니다 (07_3 스크립트).
+07_2_attention_mil_train.py(gated attention, 클래스 공유)와 완전히 같은 절차입니다.
+차이는 모델 구조뿐입니다: attention을 클래스마다 독립적으로 계산합니다
+(multi_attention_mil_common.py 의 ClassWiseAttentionMIL).
 
-산출물 (팀원 SVM/CNN 코드와 동일한 형태):
-  - classification_report.txt  (fold별 + aggregate)
-  - confusion_matrix.txt        (aggregate)
-  - auc_metrics.json / roc_curve_points.csv / roc_curve_plot.png
-  - robustness_check.json      (real vs shuffled label)
-  - pca_coords.csv / pca_plot.png
+기존 gated-attention 결과(models/gen3_attention/)를 안 건드리도록
+models/gen3_attention_classwise/ 에 따로 저장합니다.
 
 전제 조건:
   - metadata_for_multiclass.csv 가 PROJECT_DIR 바로 아래 있어야 함
@@ -23,7 +15,7 @@
 
 Usage:
   cd /home/sp00001/blood_mil_project/soeun_scripts
-  python 07_2_attention_mil_train.py --epochs 60
+  python 07_6_multi_attention_mil_train.py --epochs 60
 """
 
 import argparse
@@ -47,11 +39,11 @@ from mil_common import (
     build_bag_objects, parse_label_from_folder,
     load_metadata, get_holdout_folders_from_metadata, get_fold_split,
     new_run_id, update_latest_symlink,
-    plot_multiclass_roc_grid, plot_loss_curves,
+    plot_multiclass_roc_grid, plot_loss_curves_v2,
 )
-from attention_mil_common import (
-    AttentionMIL, AttentionMILWrapper, evaluate, train_model, relabel_bags,
-    compute_auc_macro, compute_auc_per_class, compute_roc_curve_points,
+from multi_attention_mil_common import (
+    ClassWiseAttentionMIL, ClassWiseAttentionMILWrapper, evaluate, train_model,
+    relabel_bags, compute_auc_macro, compute_auc_per_class, compute_roc_curve_points,
 )
 
 
@@ -61,12 +53,12 @@ def make_bag_lookup(all_folders):
 
 
 def build_model(args, feat_dim):
-    return AttentionMIL(in_dim=feat_dim, hidden_dim=args.hidden_dim, attn_dim=args.attn_dim,
-                         n_classes=N_CLASSES, dropout=args.dropout, gated=args.gated)
+    return ClassWiseAttentionMIL(in_dim=feat_dim, hidden_dim=args.hidden_dim,
+                                  attn_dim=args.attn_dim, n_classes=N_CLASSES,
+                                  dropout=args.dropout)
 
 
 def quick_eval(bags, seed, args, device, shuffle_labels=False, epochs=30):
-    """robustness 체크용 (real vs shuffled label). val=test로 두고 조기종료는 끔."""
     labels = np.array([b.true_label for b in bags])
     if shuffle_labels:
         rng = np.random.RandomState(seed)
@@ -91,19 +83,15 @@ def quick_eval(bags, seed, args, device, shuffle_labels=False, epochs=30):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Attention-MIL 학습 (CV + 최종 모델, val 없는 고정 epoch)")
+    parser = argparse.ArgumentParser(description="Class-wise Attention MIL 학습 (SCEMILA 방식)")
     parser.add_argument("--hidden_dim", type=int, default=256)
     parser.add_argument("--attn_dim", type=int, default=128)
-    parser.add_argument("--gated", action="store_true", default=True)
-    parser.add_argument("--no_gated", dest="gated", action="store_false")
     parser.add_argument("--dropout", type=float, default=0.3)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
-    parser.add_argument("--epochs", type=int, default=60,
-                        help="CV에서 각 fold를 학습할 때 쓰는 최대 epoch 상한 (early stopping 있음)")
+    parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--patience", type=int, default=15)
-    parser.add_argument("--internal_val_ratio", type=float, default=0.15,
-                        help="CV의 각 fold 안에서 early stopping 판단용으로 떼는 val 비율")
+    parser.add_argument("--internal_val_ratio", type=float, default=0.15)
     parser.add_argument("--n_folds", type=int, default=5)
     parser.add_argument("--n_robustness_seeds", type=int, default=10)
     parser.add_argument("--seed", type=int, default=42)
@@ -111,13 +99,13 @@ def main():
     parser.add_argument("--run_id", type=str, default=None,
                         help="결과 저장용 run id. 지정 안 하면 현재 시각으로 자동 생성 "
                              "(예: run_20260712_153045). latest 심볼릭 링크가 자동 갱신됨.")
-    parser.add_argument("--model_name", type=str, default="attention_mil_v1")
+    parser.add_argument("--model_name", type=str, default="multi_attention_mil_v1")
     args = parser.parse_args()
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     torch.manual_seed(args.seed)
-    model_gen = "gen3_attention"
-    USER_TAG = "soeun"   # 팀원과 결과 안 겹치게 이 이름으로 하위 폴더 분리
+    model_gen = "gen3_attention_classwise"
+    USER_TAG = "soeun"
     run_id = args.run_id or new_run_id()
     USER_TAG_DIR = MODEL_ROOT / model_gen / USER_TAG
 
@@ -125,13 +113,12 @@ def main():
     save_dir.mkdir(parents=True, exist_ok=True)
 
     log("=" * 55)
-    log("START: Attention-MIL 학습 (CV + 최종 모델)")
+    log("START: Class-wise Attention MIL 학습 (SCEMILA 방식)")
     log(f"  Device : {device}")
     log(f"  SaveDir: {save_dir}")
     log(f"  RunID  : {run_id}")
     log("=" * 55)
 
-    # ── metadata / 캐시 로드 ────────────────────────────────────
     log(f"[1] {args.metadata_file} 로드 중...")
     meta = load_metadata(PROJECT_DIR / args.metadata_file)
     holdout_folders = get_holdout_folders_from_metadata(meta)
@@ -141,7 +128,6 @@ def main():
 
     train_pool_folders = meta.loc[~meta["folder"].isin(holdout_folders), "folder"].tolist()
 
-    # ── 5-fold CV: 성능 확인 + "적정 epoch 수" 확인 ─────────────
     log(f"[2] {args.n_folds}-fold CV 시작...")
     fold_reports = []
     fold_best_epochs = []
@@ -203,9 +189,9 @@ def main():
     log(f"[2] CV 완료 — aggregate balanced_acc={agg_bacc:.3f} | f1_macro={agg_f1:.3f} | auc_macro={agg_auc:.3f}")
     log(f"[2] fold별 best_epoch: {fold_best_epochs} → 중앙값 {final_epochs} epoch을 최종 모델에 사용")
 
-    report_path = save_dir / "classification_report_attention.txt"
+    report_path = save_dir / "classification_report_classwise.txt"
     with open(report_path, "w") as f:
-        f.write("=== Attention-MIL hyperparameters ===\n")
+        f.write("=== Class-wise Attention MIL hyperparameters ===\n")
         f.write(json.dumps(vars(args), indent=2) + "\n\n")
         f.write(f"fold별 best_epoch: {fold_best_epochs} -> 최종 모델 epoch = {final_epochs} (중앙값)\n\n")
         for fold, rep in fold_reports:
@@ -217,22 +203,21 @@ def main():
         ))
     log(f"  classification_report 저장 → {report_path}")
 
-    cm_path = save_dir / "confusion_matrix_attention.txt"
+    cm_path = save_dir / "confusion_matrix_classwise.txt"
     cm = confusion_matrix(agg_y_true, agg_y_pred, labels=list(range(N_CLASSES)))
     np.savetxt(cm_path, cm, fmt="%d")
     log(f"  confusion_matrix 저장 → {cm_path}")
 
-    auc_path = save_dir / "auc_metrics_attention.json"
+    auc_path = save_dir / "auc_metrics_classwise.json"
 
     roc_df = compute_roc_curve_points(agg_y_true, agg_y_proba, N_CLASSES, CLASS_NAMES)
-    roc_path = save_dir / "roc_curve_points_attention.csv"
+    roc_path = save_dir / "roc_curve_points_classwise.csv"
     roc_df.to_csv(roc_path, index=False)
-    log(f"  ROC curve 원본 좌표(pooled) 저장 → {roc_path}")
 
-    roc_plot_path = save_dir / "roc_curve_plot_attention.png"
+    roc_plot_path = save_dir / "roc_curve_plot_classwise.png"
     grid_result = plot_multiclass_roc_grid(
         fold_data, CLASS_NAMES, N_CLASSES,
-        title="ROC curves — Attention-MIL (CV, per-fold + mean per subtype)",
+        title="ROC curves — Class-wise Attention MIL (CV, per-fold + mean per subtype)",
         out_path=roc_plot_path,
     )
     auc_path.write_text(json.dumps({
@@ -245,9 +230,8 @@ def main():
         "final_model_epochs": final_epochs,
     }, indent=2))
     log(f"  ROC curve plot(2x3) 저장 → {roc_plot_path}")
-    log(f"  AUC 결과(pooled + fold별 mean±std 둘 다) 갱신 → {auc_path}")
+    log(f"  AUC 결과 갱신 → {auc_path}")
 
-    # ── 최종 모델 학습: val 분리 없이 non-holdout 전체 + 고정 epoch ─
     log(f"[3] 최종 모델 학습 시작 (non-holdout {len(train_pool_folders)}명 전체, "
         f"val 분리 없음, 고정 {final_epochs} epoch)...")
     train_pool_bags = [bag_lookup[f] for f in train_pool_folders]
@@ -261,12 +245,12 @@ def main():
         epochs=final_epochs, lr=args.lr, weight_decay=args.weight_decay,
         class_weights=class_weights, verbose=True, use_early_stopping=False,
     )
-    log(f"[3] 학습 완료 (고정 {final_epochs} epoch, val 없음 — CV가 이미 epoch 수를 정했으므로 추가 판단 없음)")
+    log(f"[3] 학습 완료 (고정 {final_epochs} epoch, val 없음)")
 
-    loss_plot_path = save_dir / "loss_curve_plot_attention.png"
-    plot_loss_curves(
-        fold_train_losses, fold_best_epochs, final_train_loss,
-        title="Train loss — Attention-MIL (CV folds + final model)",
+    loss_plot_path = save_dir / "loss_curve_plot_classwise.png"
+    plot_loss_curves_v2(
+        fold_train_losses, fold_val_losses,
+        title="gen3_attention_classwise loss curves (class-wise attention)",
         out_path=loss_plot_path,
     )
     log(f"  loss curve plot 저장 → {loss_plot_path}")
@@ -276,13 +260,11 @@ def main():
     torch.save({
         "state_dict": model.state_dict(),
         "in_dim": feat_dim, "hidden_dim": args.hidden_dim, "attn_dim": args.attn_dim,
-        "gated": args.gated, "n_classes": N_CLASSES,
-        "dropout": args.dropout, "classes": CLASS_NAMES,
+        "n_classes": N_CLASSES, "dropout": args.dropout, "classes": CLASS_NAMES,
         "final_epochs": final_epochs,
     }, model_path)
     log(f"  모델 저장 완료 → {model_path}")
 
-    # ── robustness 체크 (real vs shuffled labels) ──────────────
     log(f"[4] robustness 체크 시작 ({args.n_robustness_seeds} seeds, real vs shuffled labels)...")
     real_scores = [quick_eval(train_pool_bags, s, args, device, shuffle_labels=False)
                    for s in range(args.n_robustness_seeds)]
@@ -294,16 +276,15 @@ def main():
     if np.mean(shuf_scores) > 0.35:
         log("  [WARN] 셔플 라벨인데도 balanced accuracy가 높습니다 — 데이터 누수 의심, 확인 필요")
 
-    robustness_path = save_dir / "robustness_check_attention.json"
+    robustness_path = save_dir / "robustness_check_classwise.json"
     robustness_path.write_text(json.dumps({
         "real_scores": real_scores, "real_mean": float(np.mean(real_scores)),
         "shuffled_scores": shuf_scores, "shuffled_mean": float(np.mean(shuf_scores)),
     }, indent=2))
     log(f"  robustness 결과 저장 → {robustness_path}")
 
-    # ── PCA 시각화 (환자별 attention-pooled bag 벡터) ──────────
     log("[5] PCA 시각화 준비 중...")
-    wrapper = AttentionMILWrapper(model, device)
+    wrapper = ClassWiseAttentionMILWrapper(model, device)
     groups, bag_vectors, labels = [], [], []
     for folder in train_pool_folders:
         bag = bag_lookup[folder]
@@ -316,9 +297,9 @@ def main():
     groups   = np.array(groups)
     labels   = np.array(labels)
 
-    np.save(save_dir / "X_bagvec.npy", X_bagvec)
-    np.save(save_dir / "groups_bagvec.npy", groups)
-    np.save(save_dir / "labels_bagvec.npy", labels)
+    np.save(save_dir / "X_bagvec_classwise.npy", X_bagvec)
+    np.save(save_dir / "groups_bagvec_classwise.npy", groups)
+    np.save(save_dir / "labels_bagvec_classwise.npy", labels)
 
     scaler = StandardScaler().fit(X_bagvec)
     pca = PCA(n_components=2).fit(scaler.transform(X_bagvec))
@@ -328,11 +309,9 @@ def main():
     pca_df = pd.DataFrame({
         "patient_id": groups,
         "true_subtype": [CLASS_NAMES[l] for l in labels],
-        "pc1": Z[:, 0],
-        "pc2": Z[:, 1],
+        "pc1": Z[:, 0], "pc2": Z[:, 1],
     })
-    pca_csv_path = save_dir / "pca_coords_attention.csv"
-    pca_df.to_csv(pca_csv_path, index=False)
+    pca_df.to_csv(save_dir / "pca_coords_classwise.csv", index=False)
 
     colors = plt.cm.tab10(np.linspace(0, 1, N_CLASSES))
     plt.figure()
@@ -340,8 +319,8 @@ def main():
         mask = labels == class_idx
         plt.scatter(Z[mask, 0], Z[mask, 1], label=class_name, alpha=.6, c=[colors[class_idx]])
     plt.legend()
-    plt.title("Patient bag embeddings (Attention-pooled, PCA)")
-    pca_plot_path = save_dir / "pca_plot_attention.png"
+    plt.title("Patient bag embeddings (class-wise attention, concatenated z, PCA)")
+    pca_plot_path = save_dir / "pca_plot_classwise.png"
     plt.savefig(pca_plot_path, bbox_inches="tight")
     plt.close()
     log(f"[5] PCA plot 저장 → {pca_plot_path}")
@@ -351,7 +330,7 @@ def main():
     log("=" * 55)
     log("DONE: 학습 완료")
     log(f"  model               : {model_path}")
-    log(f"  final_model_epochs  : {final_epochs} (CV fold별 best_epoch 중앙값)")
+    log(f"  final_model_epochs  : {final_epochs}")
     log(f"  classification_report: {report_path}")
     log(f"  confusion_matrix    : {cm_path}")
     log(f"  auc_metrics         : {auc_path}")

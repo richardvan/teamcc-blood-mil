@@ -190,11 +190,24 @@ def compute_roc_curve_points(y_true, y_proba, n_classes, class_names):
 
 def train_model(model, train_bags, val_bags, device, epochs, lr, weight_decay,
                  class_weights, patience=15, verbose=True, use_early_stopping=True):
+    """
+    val_bags=None 이면 "최종 모델" 모드: val로 조기종료/최선 시점을 판단하지 않고
+    지정된 epochs 만큼 고정으로 학습한 뒤 마지막 시점의 가중치를 그대로 씁니다.
+    (CV에서 이미 적정 epoch 수를 확인했다는 전제 — 팀원 CNN 코드와 동일한 방침)
+
+    val_bags가 주어지면 기존처럼 매 epoch validation을 봐서
+    best_state를 추적하고(use_early_stopping=True면 patience 후 조기종료).
+
+    반환값: (model, best_val_f1, best_epoch, train_loss_history, val_loss_history)
+      - val_bags=None 인 경우 best_val_f1=None, best_epoch=epochs(마지막 epoch), val_loss_history=[]
+      - *_loss_history: 실제로 진행된 epoch 수만큼의 loss 리스트 (loss curve 플로팅용)
+    """
     model.to(device)
     criterion = nn.CrossEntropyLoss(weight=class_weights.to(device))
     optimizer = torch.optim.Adam(model.parameters(), lr=lr, weight_decay=weight_decay)
 
-    best_val_f1, best_state, no_improve = -1.0, None, 0
+    best_val_f1, best_state, best_epoch, no_improve = -1.0, None, epochs, 0
+    train_loss_history, val_loss_history = [], []
 
     for epoch in range(1, epochs + 1):
         model.train()
@@ -214,29 +227,49 @@ def train_model(model, train_bags, val_bags, device, epochs, lr, weight_decay,
             optimizer.step()
             total_loss += loss.item()
 
-        val_acc, val_f1, _, _, _ = evaluate(model, val_bags, device)
         avg_loss = total_loss / len(train_bags)
+        train_loss_history.append(avg_loss)
 
-        if val_f1 > best_val_f1:
-            best_val_f1 = val_f1
-            best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
-            no_improve = 0
+        if val_bags is not None:
+            val_acc, val_f1, _, _, _ = evaluate(model, val_bags, device)
+
+            model.eval()
+            with torch.no_grad():
+                val_loss_total = 0.0
+                for bag in val_bags:
+                    x = bag.instances.to(device).float()
+                    target = torch.tensor([bag.true_label], device=device)
+                    logits, _ = model(x)
+                    val_loss_total += criterion(logits, target).item()
+                val_loss = val_loss_total / len(val_bags)
+            val_loss_history.append(val_loss)
+
+            if val_f1 > best_val_f1:
+                best_val_f1 = val_f1
+                best_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+                best_epoch = epoch
+                no_improve = 0
+            else:
+                no_improve += 1
+
+            if verbose and (epoch % 5 == 0 or epoch == 1):
+                log(f"    epoch {epoch:3d}/{epochs} | train_loss {avg_loss:.4f} "
+                    f"| val_loss {val_loss:.4f} | val_acc {val_acc:.3f} | val_f1_macro {val_f1:.3f} "
+                    f"| best_f1 {best_val_f1:.3f}")
+
+            if use_early_stopping and no_improve >= patience:
+                if verbose:
+                    log(f"    early stopping @ epoch {epoch} (patience={patience})")
+                break
         else:
-            no_improve += 1
-
-        if verbose and (epoch % 5 == 0 or epoch == 1):
-            log(f"    epoch {epoch:3d}/{epochs} | train_loss {avg_loss:.4f} "
-                f"| val_acc {val_acc:.3f} | val_f1_macro {val_f1:.3f} "
-                f"| best_f1 {best_val_f1:.3f}")
-
-        if use_early_stopping and no_improve >= patience:
-            if verbose:
-                log(f"    early stopping @ epoch {epoch} (patience={patience})")
-            break
+            # 최종 모델 모드: val 없음 → 그냥 고정 epoch 진행, 마지막 가중치 사용
+            if verbose and (epoch % 5 == 0 or epoch == 1):
+                log(f"    epoch {epoch:3d}/{epochs} | train_loss {avg_loss:.4f}")
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    return model, best_val_f1
+    # val_bags=None 인 경우 best_state가 없으므로 마지막 epoch의 가중치를 그대로 사용
+    return model, (best_val_f1 if val_bags is not None else None), best_epoch, train_loss_history, val_loss_history
 
 
 def relabel_bags(bags, labels):

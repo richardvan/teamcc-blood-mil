@@ -43,6 +43,9 @@ from attention_mil_common import AttentionMIL, AttentionMILWrapper
 def main():
     parser = argparse.ArgumentParser(description="전체 환자 rank-1 attention 세포 추출")
     parser.add_argument("--metadata_file", type=str, default="metadata_for_multiclass.csv")
+    parser.add_argument("--run_id", type=str, default="latest",
+                        help="어느 학습 실행 결과를 쓸지. 기본값 latest는 "
+                             "가장 최근 학습(07_2)이 갱신한 심볼릭 링크를 따라감.")
     parser.add_argument("--model_name", type=str, default="attention_mil_v1")
     parser.add_argument("--top_k", type=int, default=1,
                         help="환자당 저장할 top-k 개수 (기본 1 = rank-1만)")
@@ -50,16 +53,20 @@ def main():
 
     device = "cuda" if torch.cuda.is_available() else "cpu"
     model_gen = "gen3_attention"
-    save_dir = MODEL_ROOT / model_gen / "artifacts"
+    USER_TAG = "soeun"
+    USER_TAG_DIR = MODEL_ROOT / model_gen / USER_TAG
+    run_id = args.run_id
+    save_dir = USER_TAG_DIR / run_id / "artifacts"
     save_dir.mkdir(parents=True, exist_ok=True)
 
     log("=" * 55)
     log("START: 전체 환자 rank-1 attention 세포 추출")
     log(f"  Device : {device}")
+    log(f"  RunID  : {run_id}")
     log("=" * 55)
 
     # ── 모델 로드 (재학습 없음, 이미 저장된 최종 모델 사용) ─────
-    model_path = MODEL_ROOT / model_gen / f"{args.model_name}.pt"
+    model_path = USER_TAG_DIR / run_id / f"{args.model_name}.pt"
     log(f"[1] 모델 로드 중 → {model_path}")
     ckpt = torch.load(model_path, map_location=device)
     model = AttentionMIL(
